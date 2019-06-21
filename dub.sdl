@@ -1,0 +1,21 @@
+name "onefile"
+description "Wait-free Transactional Memory implementation"
+authors \
+    "Harry T. Vennik <htvennik@gmail.com>" \
+    "Andreia Correia <andreia.veiga@unine.ch>" \
+    "Pedro Ramalhete <pramalhe@gmail.com>" \
+    "Pascal Felber <pascal.felber@unine.ch>" \
+    "Nachshon Cohen <nachshonc@gmail.com>"
+
+copyright `Copyright © 2019, Harry T. Vennik
+
+Original C++ implementation Copyright © 2017-2019
+    Andreia Correia, Pedro Ramalhete, Pascal Felber, Nachshon Cohen
+`
+
+license "MIT"
+
+targetType "library"
+dependency "stdx-allocator" version="~>3.0.2" optional=true
+
+dflags "-dip1008"
