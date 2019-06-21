@@ -16,7 +16,7 @@ import onefile.util.allocator;
 import onefile.util.bitarray;
 
 import core.atomic;
-import std.traits : Fields, isScalarType, ReturnType;
+import std.traits : Fields, isCallable, isScalarType, ReturnType;
 
 debug import core.stdc.stdio : printf;
 
@@ -812,8 +812,8 @@ public:
     // Applies a mutative transaction or gets another thread with an ongoing
     // transaction to apply it.
     // If three 'seq' have passed since the transaction when we published our
-    // function, then the worst-case scenario is: the first transaction does not
-    // see our function; the second transaction transforms our function
+    // function, then the worst-case scenario is: the first transaction does
+    // not see our function; the second transaction transforms our function
     // but doesn't apply the corresponding write-set; the third transaction
     // guarantees that the log of the second transaction is applied.
     void innerUpdateTx(ref OpData myOpData, TransFunc* funcptr, in short tid)
@@ -828,11 +828,13 @@ public:
         operations[tid].rawStore(funcptr, results[tid].getSeq());
         OpData.current = &myOpData;
 
-        // Check 3x for the completion of our operation because we don't have a fence
-        // on operations[tid].rawStore(), otherwise it would be just 2x.
+        // Check 3x for the completion of our operation because we don't
+        // have a fence on operations[tid].rawStore(), otherwise it would be
+        // just 2x.
         for (int iter = 0; iter < 4; ++iter)
         {
-            // An update transaction is read-only until it does the first store()
+            // An update transaction is read-only until it does the first
+            // store()
             tl_isReadOnly = true;
 
             // Clear the logs of the previous transaction
@@ -875,48 +877,54 @@ public:
         retireMyFunc(tid, funcptr, firstEra);
     }
 
-    // Update transaction with non-void return value
-    static ReturnType!F updateTx(F)(F func)
-    if (!is(ReturnType!F == void))
+    // Update transaction
+    static ReturnType!func updateTx(alias func)()
+    if (isCallable!func)
     {
-        immutable tid = ThreadRegistry.getTID();
-        OpData* myOpData = &instance.opData[tid];
+        enum bool isVoid = is(ReturnType!func == void);
 
-        if (myOpData.nestedTrans > 0)
-            return func();
+        static if (!isVoid)
+        {
+            static assert(__traits(compiles, {
+                ReturnType!func v;
+                return cast(ulong) v;
+            }), ReturnType!func.stringof ~
+            " is not valid as a return type for a transaction function.");
+        }
 
-        // Copy the lambda to a std::function<> and announce a request with the pointer to it
-        g_instance.innerUpdateTx(myOpData, new TransFunc(() { // FIXME
-            return cast(ulong)func();
-        }), tid);
-
-        return cast(ReturnType!F) instance.results[tid].pload();
-    }
-
-
-    // Update transaction with void return value
-    static void updateTx(F)(F func)
-    if (is(ReturnType!F == void))
-    {
         immutable tid = ThreadRegistry.getTID();
         OpData* myOpData = &instance.opData[tid];
 
         if (myOpData.nestedTrans > 0)
         {
-            func();
-            return;
+            static if (isVoid)
+            {
+                func();
+                return;
+            }
+            else
+                return func();
         }
 
-        // Copy the lambda to a std::function<> and announce a request with the pointer to it
-        instance.innerUpdateTx(myOpData, new TransFunc(() { // FIXME
-            func();
-            return 0;
+        // Announce a request with func
+        g_instance.innerUpdateTx(myOpData, allocator.make!TransFunc(() {
+            static if (isVoid)
+            {
+                func();
+                return 0UL;
+            }
+            else
+                return cast(ulong) func();
         }), tid);
+
+        static if (!isVoid)
+            return cast(ReturnType!func) instance.results[tid].pload();
     }
 
     // Progress condition: wait-free
     // (bounded by the number of threads + maxReadTries)
-    ReturnType!F readTransaction(F)(F func)
+    ReturnType!func readTransaction(alias func)()
+    if (isCallable!func && !is(ReturnType!func == void))
     {
         immutable tid = ThreadRegistry.getTID();
         OpData* myOpData = &opData[tid];
@@ -930,7 +938,7 @@ public:
 
         debug printf("readTx(tid=%d)\n", tid);
 
-        ReturnType!F retval;
+        ReturnType!func retval;
         writeSets[tid].numStores = 0;
         myOpData.numAllocs = 0;
         myOpData.numRetires = 0;
@@ -967,12 +975,13 @@ public:
         --myOpData.nestedTrans;
 
         // Tried too many times unsucessfully, pose as an updateTx()
-        return updateTx(func);
+        return updateTx!(func);
     }
 
-    static ReturnType!F readTx(F)(F func)
+    static ReturnType!func readTx(alias func)()
+    if (isCallable!func && !is(ReturnType!func == void))
     {
-        return instance.readTransaction(func);
+        return instance.readTransaction!(func);
     }
 
     // When inside a transaction, the user can't call "make" directly because
