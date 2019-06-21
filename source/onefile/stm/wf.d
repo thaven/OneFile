@@ -12,24 +12,11 @@
 
 module onefile.stm.wf;
 
+import onefile.util.allocator;
 import onefile.util.bitarray;
 
 import core.atomic;
 import std.traits : Fields, isScalarType, ReturnType;
-
-version (Have_stdx_allocator)
-{
-    import stdx.allocator : dispose, expandArray, make, makeArray, shrinkArray;
-    import stdx.allocator.mallocator : AlignedMallocator;
-}
-else
-{
-    import std.experimental.allocator :
-            dispose, expandArray, make, makeArray, shrinkArray;
-    import std.experimental.allocator.mallocator : AlignedMallocator;
-}
-
-private alias allocator = AlignedMallocator.instance;
 
 debug import core.stdc.stdio : printf;
 

@@ -7,20 +7,7 @@
 module onefile.util.bitarray;
 
 import core.atomic;
-
-version (Have_stdx_allocator)
-{
-    import stdx.allocator : dispose, expandArray, make, makeArray, shrinkArray;
-    import stdx.allocator.mallocator : AlignedMallocator;
-}
-else
-{
-    import std.experimental.allocator :
-            dispose, expandArray, make, makeArray, shrinkArray;
-    import std.experimental.allocator.mallocator : AlignedMallocator;
-}
-
-private alias allocator = AlignedMallocator.instance;
+import onefile.util.allocator;
 
 struct AtomicBitArray
 {
