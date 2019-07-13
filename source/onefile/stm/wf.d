@@ -431,11 +431,12 @@ private:
         for (size_t iret = 0; iret < myRLTx.length;)
         {
             Request tx = myRLTx[iret];
+
             if (canDelete(curEra, tx._tm))
             {
                 myRLTx[iret] = myRLTx[$ - 1];
                 myRLTx.removeBack(1);
-                allocator.dispose(tx);
+                allocator.disposeNoGc(tx);
                 continue;
             }
             iret++;
@@ -1515,4 +1516,27 @@ private void[] toChunk(T)(T* obj)
 if (is(T == struct) || isScalarType!T)
 {
     return cast(void[])(obj[0 .. 1]);
+}
+
+private void[] toChunk(T)(T obj)
+if (is(T == class))
+{
+    return (cast(void*)obj)[0 .. obj.classinfo.init.length];
+}
+
+private void disposeNoGc(A, T)(auto ref A alloc, auto ref T obj) @nogc
+if (is(T == class))
+{
+    import std.traits : fullyQualifiedName, hasFunctionAttributes;
+
+    static assert(hasFunctionAttributes!(A.deallocate, "@nogc"),
+            "Cannot use disposeNoGc with GC reliant allocator");
+
+    static if (__traits(hasMember, T, "__dtor"))
+        static assert(hasFunctionAttributes!(T.__dtor, "@nogc"),
+                "Destructor of " ~ fullyQualifiedName!T ~ "is not @nogc");
+
+    (cast(void function(ref A, ref T) @nogc) (ref A alloc, ref T obj) {
+        alloc.dispose(obj);
+    })(alloc, obj);
 }
