@@ -30,7 +30,12 @@ struct AtomicBitArray
 
         if (newLength > _arr.length)
         {
-            if (!allocator.expandArray(_arr, newLength - _arr.length))
+            if (null is _arr)
+                _arr = allocator.makeArray!uint(newLength);
+            else if (!allocator.expandArray(_arr, newLength - _arr.length))
+                _arr = null;
+
+            if (null is _arr)
                 onOutOfMemoryError();
         }
         else
