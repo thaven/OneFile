@@ -16,7 +16,9 @@ import onefile.util.allocator;
 import onefile.util.bitarray;
 
 import core.atomic;
-import std.traits : Fields, isCallable, isScalarType, ReturnType;
+import std.algorithm.mutation : move;
+import std.traits : Fields, isCallable, isPointer, isScalarType,
+        Parameters, PointerTarget, ReturnType;
 
 debug import core.stdc.stdio : printf;
 
@@ -28,6 +30,8 @@ struct Config
     ulong txMaxAllocs = 10*1024;
     ulong txMaxRetires = 10*1024;
 }
+
+enum Config config = Config.init;
 
 struct TxId
 {
@@ -139,19 +143,22 @@ public @nogc:
 
     nothrow
     @property
+    @safe
     static ushort maxThreads()
     {
         return cast(ushort) g_instance._usedTID.length;
     }
 
     // Progress condition: wait-free bounded (by the number of threads)
+    @trusted
     static short getTID()
     {
         auto tid = g_instance.s_tid;
-        return (tid > 0) ? tid : g_instance.registerThreadNew();
+        return (tid >= 0) ? tid : g_instance.registerThreadNew();
     }
 
     // Progress condition: wait-free bounded (by the number of threads)
+    @safe
     static bool isMe(in short tid)
     {
         return tid == g_instance.s_tid;
@@ -176,10 +183,8 @@ private:
 template isTM(T)
 if (is(T == struct))
 {
-    enum isTM = is(T == TMStruct) || (.isTM!(Fields!T[0]) && 0 == () {
-        T t;
-        return t.tupleof[0].offsetof;
-    } ());
+    enum isTM = is(T == TMStruct) || is(T == shared(TMStruct))
+            || (.isTM!(Fields!T[0]) && 0 == T.tupleof[0].offsetof);
 }
 
 template isTM(T)
@@ -188,10 +193,119 @@ if (!is(T == struct))
     enum isTM = false;
 }
 
-struct TransFunc
+/++
+    Base class for classes that need to be (de)allocated transactionally
++/
+abstract class TMObject
 {
+private:
     TMStruct _tm;
-    ulong delegate() func;
+}
+
+private abstract class Request : TMObject
+{
+    @nogc:
+
+    abstract ulong execute();
+    ~this() { }
+}
+
+private final class SpecializedRequest(alias func) : Request
+{
+private:
+    Parameters!func _args;
+
+public @nogc:
+    this(Args ...)(auto ref Args args)
+    if (is(typeof(func(args))))
+    {
+        _args = args;
+    }
+
+    override ulong execute()
+    {
+        static if (is(ReturnType!func == void))
+        {
+            func(_args);
+            return 0UL;
+        }
+        else
+            return cast(ulong) func(_args);
+    }
+}
+
+private struct RListEntry
+{
+private:
+    static struct Chunk
+    {
+        void[] chunk;
+    }
+
+    void* _obj;
+    TypeInfo _ti;
+
+public @nogc nothrow:
+
+    pure
+    this(T)(T* obj)
+    if (isTM!T)
+    {
+        _obj = cast(void*) obj;
+        _ti = typeid(T);
+    }
+
+    pure
+    this(TMObject obj)
+    {
+        _obj = cast(void*) obj;
+        _ti = obj.classinfo;
+    }
+
+    this(void[] chunk)
+    {
+        _obj = allocator.make!Chunk(chunk);
+        _ti = typeid(Chunk);
+    }
+
+    ~this()
+    {
+        if (_ti is typeid(Chunk))
+            allocator.dispose(cast(Chunk*) _obj);
+    }
+
+pure:
+
+    @property
+    size_t allocSize()
+    {
+        if (auto tiCls = cast(TypeInfo_Class)_ti)
+            return tiCls.m_init.length;
+        else if (_ti is typeid(Chunk))
+            return (cast(Chunk*)_obj).chunk.length;
+        else
+            return _ti.tsize;
+    }
+
+    @property
+    void[] chunk()
+    {
+        if (_ti is typeid(Chunk))
+            return (cast(Chunk*)_obj).chunk;
+        else
+            return _obj[0 .. allocSize];
+    }
+
+    @property
+    ref TMStruct tmStruct()
+    {
+        if (_ti is typeid(Chunk))
+            return *(cast(TMStruct*) (cast(Chunk*)_obj).chunk.ptr);
+        else if (auto tmObj = cast(TMObject)_obj)
+            return tmObj._tm;
+        else
+            return *(cast(TMStruct*)_obj);
+    }
 }
 
 template CacheAligned(T)
@@ -206,15 +320,15 @@ template CacheAligned(T)
         struct CacheAligned
         {
             private T _value;
-            alias _value this;
+            alias value this;
 
-            this(T)(T value)
+            this(V)(V value)
             {
                 _value = value;
             }
 
             @property
-            ref value() return
+            ref value() inout return
             {
                 return _value;
             }
@@ -232,24 +346,26 @@ private:
 
     immutable uint maxThreads;
     CacheAligned!(shared ulong)[] he;
-    Array!(CacheAligned!(TMStruct*))[] retiredList;
-    Array!(CacheAligned!(TransFunc*))[] retiredListTx;
+    Array!(CacheAligned!RListEntry)[] retiredList;
+    Array!(CacheAligned!Request)[] retiredListTx;
+
+    @nogc:
 
     public this(uint maxThreads)
     {
         this.maxThreads = maxThreads;
         he = allocator.makeArray!(CacheAligned!(shared ulong))(maxThreads);
         retiredList = allocator.makeArray!(
-            Array!(CacheAligned!(TMStruct*)))(maxThreads);
+            Array!(CacheAligned!RListEntry))(maxThreads);
         retiredListTx = allocator.makeArray!(
-            Array!(CacheAligned!(TransFunc*)))(maxThreads);
+            Array!(CacheAligned!Request))(maxThreads);
     }
 
     ~this()
     {
         allocator.dispose(cast(CacheAligned!ulong[]) he);
-        allocator.dispose(cast(Array!(CacheAligned!(TMStruct*))[]) retiredList);
-        allocator.dispose(cast(Array!(CacheAligned!(TransFunc*))[]) retiredListTx);
+        allocator.dispose(cast(Array!(CacheAligned!RListEntry)[]) retiredList);
+        allocator.dispose(cast(Array!(CacheAligned!Request)[]) retiredListTx);
     }
 
     // Progress condition: wait-free population oblivious
@@ -267,17 +383,17 @@ private:
     }
 
     // Progress condition: wait-free population oblivious
-    void addToRetiredList(TMStruct* newdel, in short tid)
+    void addToRetiredList(RListEntry newdel, in short tid)
     in (ThreadRegistry.isMe(tid))
     {
-        retiredList[tid].insertBack(CacheAligned!(TMStruct*)(newdel));
+        retiredList[tid].insertBack(CacheAligned!RListEntry(newdel));
     }
 
     // Progress condition: wait-free population oblivious
-    void addToRetiredListTx(TransFunc* tx, in short tid)
+    void addToRetiredListTx(Request tx, in short tid)
     in (ThreadRegistry.isMe(tid))
     {
-        retiredListTx[tid].insertBack(CacheAligned!(TransFunc*)(tx));
+        retiredListTx[tid].insertBack(CacheAligned!Request(tx));
     }
 
     /**
@@ -297,14 +413,14 @@ private:
 
         for (size_t iret = 0; iret < myRL.length;)
         {
-            TMStruct* del = myRL[iret];
-            if (canDelete(curEra, del))
+            RListEntry del = myRL[iret];
+            if (canDelete(curEra, del.tmStruct))
             {
-                myRL[iret] = myRL[$ - 1];
-                myRL.removeBack();
+                move(myRL[$ - 1], myRL[iret]);
+                myRL.removeBack(1);
                 // No need to call destructor because it was executed
                 // as part of the transaction
-                allocator.deallocate(del.toChunk);
+                allocator.deallocate(del.chunk);
                 continue;
             }
             iret++;
@@ -314,11 +430,11 @@ private:
 
         for (size_t iret = 0; iret < myRLTx.length;)
         {
-            TransFunc* tx = myRLTx[iret];
-            if (canDelete(curEra, tx))
+            Request tx = myRLTx[iret];
+            if (canDelete(curEra, tx._tm))
             {
                 myRLTx[iret] = myRLTx[$ - 1];
-                myRLTx.removeBack();
+                myRLTx.removeBack(1);
                 allocator.dispose(tx);
                 continue;
             }
@@ -326,14 +442,8 @@ private:
         }
     }
 
-    bool canDelete(T)(ulong curEra, T* del)
-    if (!is(T == TMStruct) && isTM!T)
-    {
-        return canDelete(curEra, cast(TMStruct*)del);
-    }
-
     // Progress condition: wait-free bounded (by the number of threads)
-    bool canDelete(ulong curEra, TMStruct* del)
+    private bool canDelete(ulong curEra, in ref TMStruct del)
     {
         // We can't delete objects from the current transaction
         if (del._delEra == curEra)
@@ -352,8 +462,226 @@ private:
     }
 }
 
+template TMType(T)
+if (isPointer!T && !is(PointerTarget!T == shared))
+{
+    alias TMType = TMType!(shared(PointerTarget!T)*);
+}
+
+template TMType(T : shared(T))
+if (!is(T == class) && !is(T == interface))
+{
+    alias TMType = TMType!T;
+}
+
+// T is typically a pointer to a node, but it can be integers or other
+// stuff, as long as it fits in 64 bits
+align(16)
+static shared struct TMType(T)
+if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
+            (isPointer!T && is(PointerTarget!T == shared)))) ||
+            (is(T == class) || is(T == interface))))
+{
+    static if (is(T == ulong))
+        private struct Val
+        {
+            ulong untyped;
+            alias typed = untyped;
+            alias untyped this;
+        }
+    else static if (!is(T == shared))
+        private union Val
+        {
+            T _typed;
+            ulong untyped;
+            alias untyped this;
+
+            @nogc nothrow @property:
+
+            ref T typed()
+            {
+                return _typed;
+            }
+
+            ref T typed() shared
+            {
+                return *(cast(T*) &_typed);
+            }
+        }
+    else
+        private union Val
+        {
+            T typed;
+            ulong untyped;
+            alias untyped this;
+        }
+
+    // Stores the actual value as an atomic
+    Val val;
+
+    // Tx sequence number
+    ulong seq = 1;
+
+    // This is important for DCAS
+    static assert(ulong.sizeof * 2 == TMType.sizeof);
+
+    @nogc:
+
+    this(T initVal)
+    {
+        if (__ctfe)
+            val.typed = initVal;
+        else
+            isolated_store(initVal);
+    }
+
+    // Copy constructor
+    this(TMType other)
+    {
+        pstore(other.pload);
+    }
+
+    this(ulong val, ulong seq)
+    {
+        this.val.untyped = val;
+        this.seq = seq;
+    }
+
+    @property
+    ref inout(TMType!ulong) untyped() inout
+    {
+        return *(cast(inout(TMType!ulong)*) &this);
+    }
+
+    // Assignment operator from a TMType
+    void opAssign(TMType other)
+    {
+        pstore(other.pload());
+    }
+
+    // Assignment operator from a value
+    void opAssign(T value)
+    {
+        pstore(value);
+    }
+
+    void opOpAssign(string op)(TMType lhs)
+    {
+        pstore(mixin("pload() " ~ op ~ " lhs.pload()"));
+    }
+
+    T opOpAssign(string op)(T lhs)
+    {
+        auto result = mixin("pload() " ~ op ~ " lhs");
+        pstore(result);
+        return result;
+    }
+
+    // Meant to be called when we know we're the only ones touching
+    // these contents, for example, in the constructor of an object,
+    // before making the object visible to other threads.
+    void isolated_store(T newVal)
+    {
+        Val lNewVal;
+        lNewVal.typed = newVal;
+        val.untyped.atomicStore!(MemoryOrder.raw)(lNewVal.untyped);
+    }
+
+    // Used only internally by updateTx() to determine if the request is
+    // opened or not
+    private ulong getSeq() const
+    {
+        return seq.atomicLoad!(MemoryOrder.acq);
+    }
+
+    // Used only internally by updateTx()
+    private void rawStore(ref T newVal, ulong lseq)
+    {
+        Val lNewVal;
+        lNewVal.typed = newVal;
+        val.untyped.atomicStore!(MemoryOrder.raw)(lNewVal.untyped);
+        seq.atomicStore!(MemoryOrder.rel)(lseq);
+    }
+
+    T pload() const shared
+    {
+        // We have to check if there is a new ongoing transaction and if
+        // so, abort this execution immediately for two reasons:
+        // 1. Memory Reclamation: the val we're returning may be a pointer
+        //    to an object that has since been retired and deleted,
+        //    therefore we can't allow user code to de-reference it;
+        // 2. Invariant Conservation: The val we're reading may be from a
+        //    newer transaction, which implies that it may break an
+        //    invariant in the user code.
+        //
+        // See examples of invariant breaking in this post:
+        // http://concurrencyfreaks.com/2013/11/stampedlocktryoptimisticread-and.html
+
+        auto lval = val.atomicLoad!(MemoryOrder.acq);
+
+        const myOpData = OneFileWF.OpData.current;
+
+        if (null is myOpData)
+            return lval.typed;
+
+        auto lseq = seq.atomicLoad!(MemoryOrder.acq);
+
+        if (lseq > myOpData.curTx.seq)
+            throw new AbortedTx("Transaction aborted.");
+
+        if (OneFileWF.tl_isReadOnly)
+            return lval.typed;
+
+        lval.untyped = OneFileWF.g_instance
+                .writeSets[ThreadRegistry.s_tid]
+                .lookupAddr(&this, lval);
+
+        return lval.typed;
+    }
+
+    alias pload this;
+
+    private bool rawLoad(ref T keepVal, ref ulong keepSeq) const shared
+    {
+        // This method is meant to be used by the internal consensus
+        // mechanism, not by the user.
+        //
+        // Returns true if the 'val' and 'seq' placed in 'keepVal' and
+        // 'keepSeq' are consistent, i.e. linearizabile. We need to use
+        // acquire-loads to keep order and re-check the 'seq' to make sure
+        // it corresponds to the 'val' we're returning.
+
+        keepSeq = seq.atomicLoad!(MemoryOrder.acq);
+        keepVal = val.atomicLoad!(MemoryOrder.acq).typed;
+        return (keepSeq == seq.atomicLoad!(MemoryOrder.acq));
+    }
+
+    void pstore(T newVal) shared
+    {
+        // We don't need to check currTx here because we're not
+        // de-referencing the val. It's only after a load() that the val
+        // may be de-referenced (in user code), therefore we do the check
+        // on load() only.
+
+        Val lNewVal;
+        lNewVal.typed = newVal;
+
+        if (null is OneFileWF.OpData.current)
+        {
+            // Looks like we're outside a transaction
+//            val.atomicStore!(MemoryOrder.raw)(lNewVal);
+        }
+        else
+        {
+            OneFileWF.g_instance
+                .writeSets[ThreadRegistry.s_tid]
+                .addOrReplace(&this, lNewVal);
+        }
+    }
+}
+
 align(64)
-class OneFileWF(Config config = Config.init)
+class OneFileWF
 {
 private:
     // Its purpose is to hold thread-local data
@@ -361,12 +689,16 @@ private:
     {
         private static OpData* tl_current;
 
+        @nogc
+        nothrow
         @property
         static OpData* current()
         {
             return tl_current;
         }
 
+        @nogc
+        nothrow
         @property
         static void current(OpData* value)
         {
@@ -387,150 +719,14 @@ private:
         ulong numRetires;
 
         // List of retired objects during the transaction (owner thread only)
-        TMStruct*[config.txMaxRetires] rlog;
+        RListEntry[config.txMaxRetires] rlog;
 
         // Number of calls to tmNew() in this transaction (owner thread only)
         ulong numAllocs;
 
         // List of newly allocated objects during the transaction
         // (owner thread only)
-        Deletable[config.txMaxAllocs] alog;
-    }
-
-    // T is typically a pointer to a node, but it can be integers or other
-    // stuff, as long as it fits in 64 bits
-    align(16)
-    static shared struct TMType(T)
-    if (T.sizeof <= 8)
-    {
-        // Stores the actual value as an atomic
-        ulong val;
-
-        // Tx sequence number
-        ulong seq = 1;
-
-        // This is important for DCAS
-        static assert(seq.offsetof == val.offsetof + val.sizeof);
-
-        this(T initVal)
-        {
-            isolated_store(initVal);
-        }
-
-        // Copy constructor
-        this(TMType other)
-        {
-            pstore(other.pload);
-        }
-
-        this(ulong val, ulong seq)
-        {
-            this.val = val;
-            this.seq = seq;
-        }
-
-//        @disable this(this);
-
-        // Assignment operator from a TMType
-        void opAssign(TMType other) {
-            pstore(other.pload());
-        }
-
-        // Assignment operator from a value
-        void opAssign(T value) {
-            pstore(value);
-        }
-
-        // Meant to be called when know we're the only ones touching
-        // these contents, for example, in the constructor of an object,
-        // before making the object visible to other threads.
-        void isolated_store(T newVal) {
-            val.atomicStore!(MemoryOrder.raw)(cast(ulong)newVal);
-        }
-
-        // Used only internally by updateTx() to determine if the request is
-        // opened or not
-        private ulong getSeq() const
-        {
-            return seq.atomicLoad!(MemoryOrder.acq);
-        }
-
-        // Used only internally by updateTx()
-        private void rawStore(ref T newVal, ulong lseq)
-        {
-            val.atomicStore!(MemoryOrder.raw)(cast(ulong)newVal);
-            seq.atomicStore!(MemoryOrder.rel)(lseq);
-        }
-
-        T pload() const shared
-        {
-            // We have to check if there is a new ongoing transaction and if
-            // so, abort this execution immediately for two reasons:
-            // 1. Memory Reclamation: the val we're returning may be a pointer
-            //    to an object that has since been retired and deleted,
-            //    therefore we can't allow user code to de-reference it;
-            // 2. Invariant Conservation: The val we're reading may be from a
-            //    newer transaction, which implies that it may break an
-            //    invariant in the user code.
-            //
-            // See examples of invariant breaking in this post:
-            // http://concurrencyfreaks.com/2013/11/stampedlocktryoptimisticread-and.html
-
-            T lval = cast(T) val.atomicLoad!(MemoryOrder.acq);
-            const myOpData = OpData.current;
-
-            if (null is myOpData)
-                return lval;
-
-            auto lseq = seq.atomicLoad!(MemoryOrder.acq);
-
-            if (lseq > myOpData.curTx.seq)
-                throw new AbortedTx("Transaction aborted.");
-
-            if (tl_isReadOnly)
-                return lval;
-
-            return cast(T) OneFileWF.g_instance
-                    .writeSets[ThreadRegistry.s_tid]
-                    .lookupAddr(&this, cast(ulong)lval);
-        }
-
-        alias pload this;
-
-        private bool rawLoad(ref T keepVal, ref ulong keepSeq) const shared
-        {
-            // This method is meant to be used by the internal consensus
-            // mechanism, not by the user.
-            //
-            // Returns true if the 'val' and 'seq' placed in 'keepVal' and
-            // 'keepSeq' are consistent, i.e. linearizabile. We need to use
-            // acquire-loads to keep order and re-check the 'seq' to make sure
-            // it corresponds to the 'val' we're returning.
-
-            keepSeq = seq.atomicLoad!(MemoryOrder.acq);
-            keepVal = cast(T) val.atomicLoad!(MemoryOrder.acq);
-            return (keepSeq == seq.atomicLoad!(MemoryOrder.acq));
-        }
-
-        void pstore(T newVal) shared
-        {
-            // We don't need to check currTx here because we're not
-            // de-referencing the val. It's only after a load() that the val
-            // may be de-referenced (in user code), therefore we do the check
-            // on load() only.
-
-            if (null is OpData.current)
-            {
-                // Looks like we're outside a transaction
-                val.atomicStore!(MemoryOrder.raw)(cast(ulong)newVal);
-            }
-            else
-            {
-                OneFileWF.g_instance
-                    .writeSets[ThreadRegistry.s_tid]
-                    .addOrReplace(&this, cast(ulong)newVal);
-            }
-        }
+        ALogEntry[config.txMaxAllocs] alog;
     }
 
     /// A single entry in the write-set
@@ -695,13 +891,13 @@ private:
     // One entry in the log of allocations.
     // In case the transactions aborts, we can rollback our allocations,
     // hiding the type information inside the lambda.
-    static struct Deletable
+    static struct ALogEntry
     {
         /// Object to be deleted
         void[] obj;
 
         /// A wrapper to keep the type of the underlying object
-        void function(void[]) reclaim;
+        void function(void[]) @nogc reclaim;
     }
 
     __gshared static OneFileWF g_instance;
@@ -716,7 +912,7 @@ private:
     {
     align(16):
         OpData[] opData;
-        TMType!(TransFunc*)[] operations;
+        TMType!Request[] operations;
         TMType!ulong[] results;
         WriteSet[] writeSets;
     }
@@ -725,17 +921,20 @@ private:
     align(64) shared(TxId) curTx = TxId(1, 0);
 
 public:
+    @nogc
     shared static this()
     {
         g_instance = allocator.make!OneFileWF();
     }
 
+    @nogc
     @property
     static instance()
     {
         return g_instance;
     }
 
+    @nogc
     this()
     {
         if (!ThreadRegistry.instance.isInitialized)
@@ -746,11 +945,11 @@ public:
         he = allocator.make!(HazardErasOF)(cast() maxThreads);
         opData = allocator.makeArray!OpData(maxThreads);
         writeSets = allocator.makeArray!WriteSet(maxThreads);
-        operations = allocator.makeArray!(TMType!(TransFunc*))(maxThreads);
+        operations = allocator.makeArray!(TMType!Request)(maxThreads);
         results = allocator.makeArray!(TMType!ulong)(maxThreads);
 
         // This replaces the WriteSet constructor in the original C++ code
-        foreach (writeSet; writeSets)
+        foreach (ref writeSet; writeSets)
             for (size_t i = 0; i < config.hashBuckets; ++i)
                 writeSet.buckets[i] = &writeSet.log[config.txMaxStores - 1];
 
@@ -759,6 +958,7 @@ public:
             op.seq.atomicStore!(MemoryOrder.raw)(0UL);
     }
 
+    @nogc
     ~this()
     {
         allocator.dispose(opData);
@@ -771,6 +971,7 @@ public:
     // Attempts to publish our write-set (commit the transaction) and then
     // applies the write-set.
     // Returns true if my transaction was committed.
+    @nogc
     bool commitTx(ref OpData myOpData, in short tid)
     {
         // If it's a read-only transaction, then commit immediately
@@ -816,7 +1017,8 @@ public:
     // not see our function; the second transaction transforms our function
     // but doesn't apply the corresponding write-set; the third transaction
     // guarantees that the log of the second transaction is applied.
-    void innerUpdateTx(ref OpData myOpData, TransFunc* funcptr, in short tid)
+    @nogc
+    void innerUpdateTx(ref OpData myOpData, Request request, in short tid)
     {
         ++myOpData.nestedTrans;
 
@@ -825,7 +1027,7 @@ public:
         // We need an era from before the 'funcptr' is announced, so as to
         // protect it
         auto firstEra = curTx.atomicLoad!(MemoryOrder.acq).seq;
-        operations[tid].rawStore(funcptr, results[tid].getSeq());
+        operations[tid].rawStore(request, results[tid].getSeq());
         OpData.current = &myOpData;
 
         // Check 3x for the completion of our operation because we don't
@@ -874,13 +1076,21 @@ public:
         OpData.current = null;
         --myOpData.nestedTrans;
         he.clear(tid);
-        retireMyFunc(tid, funcptr, firstEra);
+        retireRequest(tid, request, firstEra);
     }
 
     // Update transaction
-    static ReturnType!func updateTx(alias func)()
-    if (isCallable!func)
+    @nogc
+    static ReturnType!func updateTx(alias func, Args ...)(auto ref Args args)
+    if (is(typeof(func(args))))
     {
+        import std.traits : hasFunctionAttributes;
+
+        // Just to provide an understandable error message
+        static assert(hasFunctionAttributes!(func, "@nogc"),
+                "Non-@nogc callable " ~ func.stringof ~
+                " cannot be used as a transaction function.");
+
         enum bool isVoid = is(ReturnType!func == void);
 
         static if (!isVoid)
@@ -899,23 +1109,16 @@ public:
         {
             static if (isVoid)
             {
-                func();
+                func(args);
                 return;
             }
             else
-                return func();
+                return func(args);
         }
 
         // Announce a request with func
-        g_instance.innerUpdateTx(myOpData, allocator.make!TransFunc(() {
-            static if (isVoid)
-            {
-                func();
-                return 0UL;
-            }
-            else
-                return cast(ulong) func();
-        }), tid);
+        g_instance.innerUpdateTx(*myOpData,
+                allocator.make!(SpecializedRequest!func)(args), tid);
 
         static if (!isVoid)
             return cast(ReturnType!func) instance.results[tid].pload();
@@ -923,14 +1126,15 @@ public:
 
     // Progress condition: wait-free
     // (bounded by the number of threads + maxReadTries)
-    ReturnType!func readTransaction(alias func)()
+    @nogc
+    ReturnType!func readTransaction(alias func)(auto ref Parameters!func args)
     if (isCallable!func && !is(ReturnType!func == void))
     {
         immutable tid = ThreadRegistry.getTID();
         OpData* myOpData = &opData[tid];
 
         if (myOpData.nestedTrans > 0)
-            return func();
+            return func(args);
 
         ++myOpData.nestedTrans;
         OpData.current = myOpData;
@@ -945,7 +1149,7 @@ public:
 
         for (int iter = 0; iter < maxReadTries; ++iter)
         {
-            myOpData.curTx = curTx.atomicLoad(MemoryOrder.acq);
+            myOpData.curTx = curTx.atomicLoad!(MemoryOrder.acq);
             helpApply(myOpData.curTx, tid);
 
             // Use HE to protect the objects we're going to access during the
@@ -959,7 +1163,7 @@ public:
                 continue;
 
             try
-                retval = func();
+                retval = func(args);
             catch (AbortedTx)
                 continue;
 
@@ -975,13 +1179,21 @@ public:
         --myOpData.nestedTrans;
 
         // Tried too many times unsucessfully, pose as an updateTx()
-        return updateTx!(func);
+        return updateTx!(func)(args);
     }
 
-    static ReturnType!func readTx(alias func)()
+    @nogc
+    static ReturnType!func readTx(alias func)(auto ref Parameters!func args)
     if (isCallable!func && !is(ReturnType!func == void))
     {
-        return instance.readTransaction!(func);
+        return instance.readTransaction!(func)(args);
+    }
+
+    @nogc
+    @property
+    static bool isInTx()
+    {
+        return null !is OpData.current;
     }
 
     // When inside a transaction, the user can't call "make" directly because
@@ -996,25 +1208,47 @@ public:
     if (isTM!T)
     {
         auto objPtr = allocator.make!T(args);
-        (cast(TMStruct*)objPtr)._newEra = g_instance.curTx
-                .atomicLoad!(MemoryOrder.acq).seq;
+
+        static if (is(T == class))
+            auto tmsPtr = &(cast(TMObject)objPtr)._tm;
+        else
+            auto tmsPtr = cast(TMStruct*)objPtr;
+
+        tmsPtr._newEra = g_instance.curTx.atomicLoad!(MemoryOrder.acq).seq;
 
         OpData* myOpData = OpData.current;
 
-        if (myOpData != null)
+        if (myOpData !is null)
         {
             assert(myOpData.numAllocs != config.txMaxAllocs);
-            Deletable* del = myOpData.alog[myOpData.numAllocs++];
-            del.obj = objPtr[0 .. T.sizeof];
-            // This func ptr to a lambda gives us a way to call the destructor
-            // when a transaction aborts.
-            del.reclaim = function void(void[] obj)
-            in (obj.length == T.sizeof)
+            ALogEntry* del = &myOpData.alog[myOpData.numAllocs++];
+
+            // del.reclaim is set to a func ptr to a lambda. this gives us a
+            // way to call the destructor when a transaction aborts.
+            static if (is(T == class))
             {
-                allocator.dispose(cast(T*)obj.ptr);
-            };
+                enum instanceSize = __traits(classInstanceSize, T);
+                del.obj = (cast(void*)objPtr)[0 .. instanceSize];
+                del.reclaim = function void(void[] obj)
+                in (obj.length == instanceSize)
+                in (null !is cast(T)obj)
+                {
+                    allocator.dispose(cast(T)(obj.ptr));
+                };
+            }
+            else
+            {
+                del.obj = cast(void[])(objPtr[0 .. 1]);
+                del.reclaim = function void(void[] obj)
+                in (obj.length == T.sizeof)
+                {
+                    allocator.dispose(cast(T*)obj.ptr);
+                };
+            }
         }
-        return objPtr;
+
+        // cast is a work around if T is an unshared 'shared struct'
+        return cast(T*) objPtr;
     }
 
     // The user can not directly delete objects in the transaction because the
@@ -1027,6 +1261,8 @@ public:
     static void tmDispose(T)(T* obj)
     if (isTM!T)
     {
+        import std.traits : hasElaborateDestructor;
+
         if (obj is null)
             return;
 
@@ -1038,12 +1274,39 @@ public:
             return;
         }
 
-        typeid(*obj).destroy(obj); // Execute destructor as part of the current transaction
+        static if (hasElaborateDestructor!T)
+            obj.__dtor(); // Execute destructor as part of the current transaction
+
         assert(myOpData.numRetires != config.txMaxRetires);
-        myOpData.rlog[myOpData.numRetires++] = obj;
+
+        auto rle = RListEntry(obj);
+        move(rle, myOpData.rlog[myOpData.numRetires++]);
+    }
+
+    static void tmDispose(TMObject obj)
+    {
+        if (obj is null)
+            return;
+
+        OpData* myOpData = OpData.current;
+        if (myOpData is null)
+        {
+            // Outside a transaction, use regular dispose
+            allocator.dispose(obj);
+            return;
+        }
+
+        static if (__traits(hasMember, obj, "__dtor"))
+            obj.__dtor(); // Execute destructor as part of the current transaction
+
+        assert(myOpData.numRetires != config.txMaxRetires);
+
+        auto rle = RListEntry(obj);
+        move(rle, myOpData.rlog[myOpData.numRetires++]);
     }
 
     // We snap a TMStruct at the beginning of the allocation
+    @nogc
     static void[] tmAllocate(in size_t size)
     {
         auto roundedSize = (size + 7) & ~7;
@@ -1060,7 +1323,7 @@ public:
         if (myOpData !is null)
         {
             assert(myOpData.numAllocs != config.txMaxAllocs);
-            Deletable* del = &myOpData.alog[myOpData.numAllocs++];
+            ALogEntry* del = &myOpData.alog[myOpData.numAllocs++];
             del.obj = chunk;
             del.reclaim = function void(void[] obj) {
                 allocator.deallocate(obj);
@@ -1071,6 +1334,7 @@ public:
     }
 
     // We assume there is a TMStruct in the beginning of the allocation
+    @nogc
     static void tmDeallocate(void[] chunk)
     {
         if (chunk is null)
@@ -1088,10 +1352,12 @@ public:
         }
 
         assert(myOpData.numRetires != config.txMaxRetires);
-        myOpData.rlog[myOpData.numRetires++] = cast(TMStruct*)tmChunk.ptr;
+
+        auto rle = RListEntry(tmChunk);
+        move(rle, myOpData.rlog[myOpData.numRetires++]);
     }
 
-private:
+private @nogc:
     // Progress condition: wait-free population oblivious
     void helpApply(in TxId lcurTx, in short tid)
     {
@@ -1154,7 +1420,7 @@ private:
         // First, add all the objects to the list of retired/zombies
         for (size_t i = 0; i < myOpData.numRetires; ++i)
         {
-            myOpData.rlog[i]._delEra = lseq;
+            myOpData.rlog[i].tmStruct._delEra = lseq;
             he.addToRetiredList(myOpData.rlog[i], tid);
         }
 
@@ -1163,11 +1429,11 @@ private:
         myOpData.numRetires = 0;
     }
 
-    void retireMyFunc(in short tid, TransFunc* myfunc, ulong firstEra)
+    void retireRequest(in short tid, Request request, ulong firstEra)
     {
-        myfunc._tm._newEra = firstEra;
-        myfunc._tm._delEra = curTx.atomicLoad!(MemoryOrder.acq).seq + 1; // Do we really need the +1 ?
-        he.addToRetiredListTx(myfunc, tid);
+        request._tm._newEra = firstEra;
+        request._tm._delEra = curTx.atomicLoad!(MemoryOrder.acq).seq + 1; // Do we really need the +1 ?
+        he.addToRetiredListTx(request, tid);
     }
 
     // Aggregate all the functions of the different thread's writeTransaction()
@@ -1179,9 +1445,9 @@ private:
         {
             // Check if the operation of thread i has been applied (has a
             // matching result)
-            TransFunc* txfunc;
+            Request request;
             ulong res, operationsSeq, resultSeq;
-            if (!operations[i].rawLoad(txfunc, operationsSeq))
+            if (!operations[i].rawLoad(request, operationsSeq))
                 continue;
 
             if (!results[i].rawLoad(res, resultSeq))
@@ -1198,7 +1464,7 @@ private:
 
             // Apply the operation of thread i and save result in results[i],
             // with this store being part of the transaction itself.
-            results[i] = txfunc.func();
+            results[i] = request.execute();
         }
 
         return true;
@@ -1240,10 +1506,10 @@ if (is(ReturnType!F == void))
     OneFileWF.instance.readTx(func);
 }
 
-alias tmMake = OneFileWF!().tmMake;
-alias tmDispose = OneFileWF!().tmDispose;
-alias tmAllocate = OneFileWF!().tmAllocate;
-alias tmDeallocate = OneFileWF!().tmDeallocate;
+alias tmMake = OneFileWF.tmMake;
+alias tmDispose = OneFileWF.tmDispose;
+alias tmAllocate = OneFileWF.tmAllocate;
+alias tmDeallocate = OneFileWF.tmDeallocate;
 
 private void[] toChunk(T)(T* obj)
 if (is(T == struct) || isScalarType!T)
