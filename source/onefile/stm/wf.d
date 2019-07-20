@@ -213,24 +213,86 @@ private abstract class Request : TMObject
 private final class SpecializedRequest(alias func) : Request
 {
 private:
-    Parameters!func _args;
+    import std.traits :
+            STC = ParameterStorageClass,
+            ParameterStorageClassTuple;
+
+    import std.meta : AliasSeq;
+
+    enum bool funcHasParameters = Parameters!func.length > 0;
+
+    static if (funcHasParameters)
+    {
+        alias FP = Parameters!func;
+        alias fpStc = ParameterStorageClassTuple!func;
+        static assert (FP.length == fpStc.length);
+
+        template RefAsPtr(size_t i)
+        if (i < FP.length)
+        {
+            static if (fpStc[i] & (STC.ref_ | STC.out_))
+                alias RefAsPtr = FP[i]*;
+            else
+                alias RefAsPtr = FP[i];
+        }
+
+        template RefAsPtrAcc(size_t i)
+        if (i < FP.length)
+        {
+            static if (i < FP.length - 1)
+                alias RefAsPtrAcc = AliasSeq!(RefAsPtr!i, RefAsPtrAcc!(i + 1));
+            else
+                alias RefAsPtrAcc = RefAsPtr!i;
+        }
+
+        // AliasSeq is necessary here to ensure _args is always a tuple
+        AliasSeq!(RefAsPtrAcc!0) _args;
+    }
+
+    static if (funcHasParameters)
+    {
+        enum _code_callFunc = () {
+            import std.format : format;
+            import std.string : join;
+
+            assert (__ctfe);
+
+            string[] expandedArgs;
+
+            static foreach (i; 0 .. FP.length)
+            {
+                expandedArgs ~= format("%s_args[%d]",
+                        (fpStc[i] & (STC.ref_ | STC.out_)) ? "*" : null, i);
+            }
+
+            return format("func(%s)", expandedArgs.join(", "));
+        } ();
+    } else {
+        enum _code_callFunc = "func()";
+    }
 
 public @nogc:
-    this(Args ...)(auto ref Args args)
-    if (is(typeof(func(args))))
+    static if (funcHasParameters)
+    this(ref Parameters!func args)
     {
-        _args = args;
+        static foreach (size_t i, arg; args)
+        {
+            static if (fpStc[i] & (STC.ref_ | STC.out_))
+                _args[i] = &arg;
+            else
+                _args[i] = arg;
+        }
     }
 
     override ulong execute()
     {
         static if (is(ReturnType!func == void))
         {
-            func(_args);
+            (mixin(_code_callFunc));
             return 0UL;
         }
         else
-            return cast(ulong) func(_args);
+            return cast(ulong) mixin(_code_callFunc);
     }
 }
 
