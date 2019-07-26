@@ -468,6 +468,7 @@ private:
     void clean(ulong curEra, in short tid)
     in (ThreadRegistry.isMe(tid))
     {
+        debug int n;
         auto myRL = retiredList[tid];
 
         if (myRL.length < thresholdR)
@@ -482,11 +483,16 @@ private:
                 myRL.removeBack(1);
                 // No need to call destructor because it was executed
                 // as part of the transaction
+
+                debug ++n;
                 allocator.deallocate(del.chunk);
                 continue;
             }
             iret++;
         }
+
+        debug printf("HE Deallocated %d objects\n", n);
+        debug n = 0;
 
         auto myRLTx = retiredListTx[tid];
 
@@ -499,10 +505,13 @@ private:
                 myRLTx[iret] = myRLTx[$ - 1];
                 myRLTx.removeBack(1);
                 allocator.disposeNoGc(tx);
+                debug ++n;
                 continue;
             }
             iret++;
         }
+
+        debug printf("HE Deallocated %d requests\n", n);
     }
 
     // Progress condition: wait-free bounded (by the number of threads)
@@ -1058,7 +1067,11 @@ public:
             tid, lcurTx.seq, lcurTx.idx, seq + 1, cast(ulong)tid);
 
         if (!curTx.casByRef(lcurTx, newTx))
+        {
+            debug printf("Failed to commit transaction (%ld,%ld)\n",
+                seq + 1, cast(ulong)tid);
             return false;
+        }
 
         // Execute each store in the write-set using DCAS() and close the
         // request
