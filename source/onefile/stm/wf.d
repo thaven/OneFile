@@ -127,7 +127,7 @@ public @nogc:
 
     // Progress condition: wait-free population oblivious
     nothrow
-    void deregisterThread(in short tid) shared
+    private void deregisterThread(in short tid) shared
     {
         _usedTID[tid] = false;
     }
@@ -155,6 +155,12 @@ public @nogc:
     {
         auto tid = g_instance.s_tid;
         return (tid >= 0) ? tid : g_instance.registerThreadNew();
+    }
+
+    static void deregisterMe()
+    {
+        g_instance.deregisterThread(getTID());
+        s_tid = -1;
     }
 
     // Progress condition: wait-free bounded (by the number of threads)
