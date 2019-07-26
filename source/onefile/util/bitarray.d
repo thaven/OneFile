@@ -23,6 +23,7 @@ struct AtomicBitArray
     @property
     @system
     void length(size_t value)
+    out(; this.length >= value)
     {
         import core.exception : onOutOfMemoryError;
 
@@ -45,11 +46,17 @@ struct AtomicBitArray
         }
     }
 
+    @property
+    size_t length() const
+    {
+        return _arr.length * 32;
+    }
+
 pure:
     @property
     size_t length() const shared
     {
-        return _arr.length / 4;
+        return _arr.length * 32;
     }
 
     bool opIndex(in size_t idx) const shared
