@@ -17,8 +17,8 @@ import onefile.util.bitarray;
 
 import core.atomic;
 import std.algorithm.mutation : move;
-import std.traits : Fields, isCallable, isPointer, isScalarType,
-        Parameters, PointerTarget, ReturnType;
+import std.traits : Fields, hasFunctionAttributes, isCallable, isPointer,
+        isScalarType, Parameters, PointerTarget, ReturnType;
 
 debug import core.stdc.stdio : printf;
 
@@ -214,6 +214,33 @@ private abstract class Request : TMObject
 
     abstract ulong execute();
     ~this() { }
+}
+
+private final class DelegateRequest(DG) : Request
+if (is(DG == delegate)
+        && 0 == Parameters!DG.length
+        && hasFunctionAttributes!(DG, "@nogc"))
+{
+private:
+    DG _func;
+
+public @nogc:
+    this(DG func)
+    in (null !is func)
+    {
+        _func = func;
+    }
+
+    override ulong execute()
+    {
+        static if (is(ReturnType!DG == void))
+        {
+            _func();
+            return 0UL;
+        }
+        else
+            return cast(ulong) _func();
+    }
 }
 
 private final class SpecializedRequest(alias func) : Request
@@ -1200,10 +1227,49 @@ public:
 
         // Announce a request with func
         innerUpdateTx(*myOpData,
-            allocator.make!(SpecializedRequest!func)(args), tid);
+                allocator.make!(SpecializedRequest!func)(args), tid);
 
         static if (!isVoid)
             return cast(ReturnType!func) results[tid].pload();
+    }
+
+    @nogc
+    ReturnType!DG updateTx(DG)(scope DG func)
+    if (is(DG == delegate)
+            && 0 == Parameters!DG.length
+            && hasFunctionAttributes!(DG, "@nogc"))
+    {
+        enum bool isVoid = is(ReturnType!DG == void);
+
+        static if (!isVoid)
+        {
+            static assert(__traits(compiles, {
+                ReturnType!DG v;
+                return cast(ulong) v;
+            }), ReturnType!DG.stringof ~
+            " is not valid as a return type for a transaction function.");
+        }
+
+        immutable tid = ThreadRegistry.getTID();
+        OpData* myOpData = &opData[tid];
+
+        if (myOpData.nestedTrans > 0)
+        {
+            static if (isVoid)
+            {
+                func();
+                return;
+            }
+            else
+                return func();
+        }
+
+        // Announce a request with func
+        innerUpdateTx(*myOpData,
+                allocator.make!(DelegateRequest!DG)(func), tid);
+
+        static if (!isVoid)
+            return cast(ReturnType!DG) results[tid].pload();
     }
 
     // Progress condition: wait-free
@@ -1257,11 +1323,76 @@ public:
             return retval;
         }
 
-        debug printf("readTx() executed maxReadTries, posing as updateTx()\n");
+        debug printf("readTx() executed %d times, posing as updateTx()\n",
+                maxReadTries);
+
         --myOpData.nestedTrans;
 
         // Tried too many times unsucessfully, pose as an updateTx()
         return updateTx!(func)(args);
+    }
+
+
+    // Progress condition: wait-free
+    // (bounded by the number of threads + maxReadTries)
+    @nogc
+    ReturnType!DG readTx(DG)(scope DG func)
+    if (is(DG == delegate)
+            && 0 == Parameters!DG.length
+            && hasFunctionAttributes!(DG, "@nogc"))
+    {
+        immutable tid = ThreadRegistry.getTID();
+        OpData* myOpData = &opData[tid];
+
+        if (myOpData.nestedTrans > 0)
+            return func();
+
+        ++myOpData.nestedTrans;
+        OpData.current = myOpData;
+        tl_isReadOnly = true;
+
+        debug printf("readTx(tid=%d)\n", tid);
+
+        ReturnType!func retval;
+        writeSets[tid].numStores = 0;
+        myOpData.numAllocs = 0;
+        myOpData.numRetires = 0;
+
+        for (int iter = 0; iter < maxReadTries; ++iter)
+        {
+            myOpData.curTx = curTx.atomicLoad!(MemoryOrder.acq);
+            helpApply(myOpData.curTx, tid);
+
+            // Use HE to protect the objects we're going to access during the
+            // simulation
+            he.set(myOpData.curTx, tid);
+
+            // Reset the write-set after (possibly) helping another transaction
+            // complete
+            writeSets[tid].numStores = 0;
+            if (myOpData.curTx != curTx.atomicLoad)
+                continue;
+
+            try
+                retval = func();
+            catch (AbortedTx)
+                continue;
+
+            // Clean up
+            --myOpData.nestedTrans;
+            OpData.current = null;
+            he.clear(tid);
+
+            return retval;
+        }
+
+        debug printf("readTx() executed %d times, posing as updateTx()\n",
+                maxReadTries);
+
+        --myOpData.nestedTrans;
+
+        // Tried too many times unsucessfully, pose as an updateTx()
+        return updateTx(func);
     }
 
     @nogc
@@ -1556,53 +1687,69 @@ class AbortedTx : Exception
 //
 // Wrapper methods to the global TM instance. The user should use these:
 //
-ReturnType!func updateTx(alias func)(auto ref Parameters!func args)
-if (!is(ReturnType!func == void))
-{
-    return OneFileWF.instance.updateTx!func(args);
+
+@nogc {
+    ReturnType!DG readTx(DG)(scope DG func)
+    if (!is(ReturnType!DG == void) && 0 == Parameters!func.length)
+    {
+        return OneFileWF.instance.readTx(func);
+    }
+
+    ReturnType!func readTx(alias func)(auto ref Parameters!func args)
+    if (!is(ReturnType!func == void))
+    {
+        return OneFileWF.instance.readTx!func(args);
+    }
+
+    ReturnType!DG updateTx(DG)(scope DG func)
+    if (!is(ReturnType!DG == void) && 0 == Parameters!func.length)
+    {
+        return OneFileWF.instance.updateTx(func);
+    }
+
+    ReturnType!func updateTx(alias func)(auto ref Parameters!func args)
+    if (!is(ReturnType!func == void))
+    {
+        return OneFileWF.instance.updateTx!func(args);
+    }
+
+    void updateTx(DG)(scope DG func)
+    if (is(ReturnType!DG == void) && 0 == Parameters!func.length)
+    {
+        OneFileWF.instance.updateTx(func);
+    }
+
+    void updateTx(alias func)(auto ref Parameters!func args)
+    if (is(ReturnType!func == void))
+    {
+        OneFileWF.instance.updateTx!func(args);
+    }
+
+    alias tmMake = OneFileWF.tmMake;
+    alias tmDispose = OneFileWF.tmDispose;
+    alias tmAllocate = OneFileWF.tmAllocate;
+    alias tmDeallocate = OneFileWF.tmDeallocate;
+
+    alias isInTx = OneFileWF.isInTx;
 }
-
-ReturnType!func readTx(alias func)(auto ref Parameters!func args)
-if (!is(ReturnType!func == void))
-{
-    return OneFileWF.instance.readTx!func(args);
-}
-
-void updateTx(alias func)(auto ref Parameters!func args)
-if (is(ReturnType!func == void))
-{
-    OneFileWF.instance.updateTx!func(args);
-}
-
-void readTx(alias func)(auto ref Parameters!func args)
-if (is(ReturnType!func == void))
-{
-    OneFileWF.instance.readTx!func(args);
-}
-
-alias tmMake = OneFileWF.tmMake;
-alias tmDispose = OneFileWF.tmDispose;
-alias tmAllocate = OneFileWF.tmAllocate;
-alias tmDeallocate = OneFileWF.tmDeallocate;
-
-alias isInTx = OneFileWF.isInTx;
-
 
 // --- Some private helper functions
+private:
 
-private void[] toChunk(T)(T* obj)
+void[] toChunk(T)(T* obj)
 if (is(T == struct) || isScalarType!T)
 {
     return cast(void[])(obj[0 .. 1]);
 }
 
-private void[] toChunk(T)(T obj)
+void[] toChunk(T)(T obj)
 if (is(T == class))
 {
     return (cast(void*)obj)[0 .. obj.classinfo.init.length];
 }
 
-private void disposeNoGc(A, T)(auto ref A alloc, auto ref T obj) @nogc
+@nogc
+void disposeNoGc(A, T)(auto ref A alloc, auto ref T obj)
 if (is(T == class))
 {
     import std.traits : fullyQualifiedName, hasFunctionAttributes;
