@@ -1100,7 +1100,8 @@ public:
     // but doesn't apply the corresponding write-set; the third transaction
     // guarantees that the log of the second transaction is applied.
     @nogc
-    void innerUpdateTx(ref OpData myOpData, Request request, in short tid)
+    private void innerUpdateTx(
+        ref OpData myOpData, Request request, in short tid)
     {
         ++myOpData.nestedTrans;
 
@@ -1163,8 +1164,7 @@ public:
 
     // Update transaction
     @nogc
-    static ReturnType!func updateTx(alias func, Args ...)(auto ref Args args)
-    if (is(typeof(func(args))))
+    ReturnType!func updateTx(alias func)(auto ref Parameters!func args)
     {
         import std.traits : hasFunctionAttributes;
 
@@ -1185,7 +1185,7 @@ public:
         }
 
         immutable tid = ThreadRegistry.getTID();
-        OpData* myOpData = &instance.opData[tid];
+        OpData* myOpData = &opData[tid];
 
         if (myOpData.nestedTrans > 0)
         {
@@ -1199,17 +1199,17 @@ public:
         }
 
         // Announce a request with func
-        g_instance.innerUpdateTx(*myOpData,
-                allocator.make!(SpecializedRequest!func)(args), tid);
+        innerUpdateTx(*myOpData,
+            allocator.make!(SpecializedRequest!func)(args), tid);
 
         static if (!isVoid)
-            return cast(ReturnType!func) instance.results[tid].pload();
+            return cast(ReturnType!func) results[tid].pload();
     }
 
     // Progress condition: wait-free
     // (bounded by the number of threads + maxReadTries)
     @nogc
-    ReturnType!func readTransaction(alias func)(auto ref Parameters!func args)
+    ReturnType!func readTx(alias func)(auto ref Parameters!func args)
     if (isCallable!func && !is(ReturnType!func == void))
     {
         immutable tid = ThreadRegistry.getTID();
@@ -1262,13 +1262,6 @@ public:
 
         // Tried too many times unsucessfully, pose as an updateTx()
         return updateTx!(func)(args);
-    }
-
-    @nogc
-    static ReturnType!func readTx(alias func)(auto ref Parameters!func args)
-    if (isCallable!func && !is(ReturnType!func == void))
-    {
-        return instance.readTransaction!(func)(args);
     }
 
     @nogc
@@ -1378,8 +1371,7 @@ public:
             return;
         }
 
-        static if (__traits(hasMember, obj, "__dtor"))
-            obj.__dtor(); // Execute destructor as part of the current transaction
+        obj.destroy!false;
 
         assert(myOpData.numRetires != config.txMaxRetires);
 
@@ -1564,34 +1556,39 @@ class AbortedTx : Exception
 //
 // Wrapper methods to the global TM instance. The user should use these:
 //
-ReturnType!F updateTx(F)(F func)
-if (!is(ReturnType!F == void))
+ReturnType!func updateTx(alias func)(auto ref Parameters!func args)
+if (!is(ReturnType!func == void))
 {
-    return OneFileWF.instance.updateTx(func);
+    return OneFileWF.instance.updateTx!func(args);
 }
 
-ReturnType!F readTx(F)(F func)
-if (!is(ReturnType!F == void))
+ReturnType!func readTx(alias func)(auto ref Parameters!func args)
+if (!is(ReturnType!func == void))
 {
-    return OneFileWF.instance.readTx(func);
+    return OneFileWF.instance.readTx!func(args);
 }
 
-void updateTx(F)(F func)
-if (is(ReturnType!F == void))
+void updateTx(alias func)(auto ref Parameters!func args)
+if (is(ReturnType!func == void))
 {
-    OneFileWF.instance.updateTx(func);
+    OneFileWF.instance.updateTx!func(args);
 }
 
-void readTx(F)(F func)
-if (is(ReturnType!F == void))
+void readTx(alias func)(auto ref Parameters!func args)
+if (is(ReturnType!func == void))
 {
-    OneFileWF.instance.readTx(func);
+    OneFileWF.instance.readTx!func(args);
 }
 
 alias tmMake = OneFileWF.tmMake;
 alias tmDispose = OneFileWF.tmDispose;
 alias tmAllocate = OneFileWF.tmAllocate;
 alias tmDeallocate = OneFileWF.tmDeallocate;
+
+alias isInTx = OneFileWF.isInTx;
+
+
+// --- Some private helper functions
 
 private void[] toChunk(T)(T* obj)
 if (is(T == struct) || isScalarType!T)
