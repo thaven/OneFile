@@ -1482,7 +1482,7 @@ public:
     // The retire() puts the objects in the rlog, and only when the transaction
     // commits, the objects are put in the Hazard Eras retired list.
     // The del._delEra is filled in retireRetiresFromLog().
-    static void tmDispose(T)(T* obj)
+    static void tmDispose(T)(auto ref T* obj)
     if (isTM!T)
     {
         import std.traits : hasElaborateDestructor;
@@ -1505,9 +1505,13 @@ public:
 
         auto rle = RListEntry(obj);
         move(rle, myOpData.rlog[myOpData.numRetires++]);
+
+        static if (__traits(isRef, obj))
+            obj = null;
     }
 
-    static void tmDispose(TMObject obj)
+    static void tmDispose(T)(auto ref T obj)
+    if (is(Unqual!T : TMObject))
     {
         if (obj is null)
             return;
@@ -1527,6 +1531,9 @@ public:
 
         auto rle = RListEntry(obj);
         move(rle, myOpData.rlog[myOpData.numRetires++]);
+
+        static if (__traits(isRef, obj))
+            obj = null;
     }
 
     // We snap a TMStruct at the beginning of the allocation
