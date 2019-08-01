@@ -18,7 +18,7 @@ import onefile.util.bitarray;
 import core.atomic;
 import std.algorithm.mutation : move;
 import std.traits : Fields, hasFunctionAttributes, isCallable, isPointer,
-        isScalarType, Parameters, PointerTarget, ReturnType;
+        isScalarType, Parameters, PointerTarget, ReturnType, Unqual;
 
 debug import core.stdc.stdio : printf;
 
@@ -324,6 +324,9 @@ public @nogc:
             (mixin(_code_callFunc));
             return 0UL;
         }
+        else static if (is(ReturnType!func == class)
+                || is(ReturnType!func == interface))
+            return cast(ulong) cast(void*) mixin(_code_callFunc);
         else
             return cast(ulong) mixin(_code_callFunc);
     }
@@ -351,7 +354,8 @@ public @nogc nothrow:
     }
 
     pure
-    this(TMObject obj)
+    this(T)(T obj)
+    if (is(Unqual!T : TMObject))
     {
         _obj = cast(void*) obj;
         _ti = obj.classinfo;
@@ -1204,11 +1208,13 @@ public:
 
         static if (!isVoid)
         {
-            static assert(__traits(compiles, {
-                ReturnType!func v;
-                return cast(ulong) v;
-            }), ReturnType!func.stringof ~
-            " is not valid as a return type for a transaction function.");
+            static assert(is(ReturnType!func == class)
+                    || is(ReturnType!func == interface)
+                    || __traits(compiles, {
+                        ReturnType!func v;
+                        return cast(ulong) v;
+                    }), ReturnType!func.stringof ~
+                    " is not a valid return type for a transaction function.");
         }
 
         immutable tid = ThreadRegistry.getTID();
@@ -1230,7 +1236,7 @@ public:
                 allocator.make!(SpecializedRequest!func)(args), tid);
 
         static if (!isVoid)
-            return cast(ReturnType!func) results[tid].pload();
+            return (cast(TMType!(ReturnType!func)) results[tid]).pload();
     }
 
     @nogc
@@ -1243,11 +1249,13 @@ public:
 
         static if (!isVoid)
         {
-            static assert(__traits(compiles, {
-                ReturnType!DG v;
-                return cast(ulong) v;
-            }), ReturnType!DG.stringof ~
-            " is not valid as a return type for a transaction function.");
+            static assert(is(ReturnType!func == class)
+                    || is(ReturnType!func == interface)
+                    || __traits(compiles, {
+                        ReturnType!func v;
+                        return cast(ulong) v;
+                    }), ReturnType!func.stringof ~
+                    " is not a valid return type for a transaction function.");
         }
 
         immutable tid = ThreadRegistry.getTID();
@@ -1278,6 +1286,8 @@ public:
     ReturnType!func readTx(alias func)(auto ref Parameters!func args)
     if (isCallable!func && !is(ReturnType!func == void))
     {
+        import std.typecons : UnqualRef;
+
         immutable tid = ThreadRegistry.getTID();
         OpData* myOpData = &opData[tid];
 
@@ -1290,7 +1300,12 @@ public:
 
         debug printf("readTx(tid=%d)\n", tid);
 
-        ReturnType!func retval;
+        static if (is(ReturnType!func == class)
+                || is(ReturnType!func == interface))
+            UnqualRef!(ReturnType!func) retval;
+        else
+            ReturnType!func retval;
+
         writeSets[tid].numStores = 0;
         myOpData.numAllocs = 0;
         myOpData.numRetires = 0;
@@ -1409,9 +1424,9 @@ public:
     // will delete the objects so that there are no leaks.
     //
     // TODO:
-    //    - add support for class types
-    static T* tmMake(T, Args...)(Args args)
-    if (isTM!T)
+    //    - improve support for class types
+    static tmMake(T, Args...)(Args args)
+    if (isTM!T || is(Unqual!T : TMObject))
     {
         auto objPtr = allocator.make!T(args);
 
@@ -1437,9 +1452,9 @@ public:
                 del.obj = (cast(void*)objPtr)[0 .. instanceSize];
                 del.reclaim = function void(void[] obj)
                 in (obj.length == instanceSize)
-                in (null !is cast(T)obj)
+                in (null !is cast(T)obj.ptr)
                 {
-                    allocator.dispose(cast(T)(obj.ptr));
+                    allocator.disposeNoGc(cast(T)(obj.ptr));
                 };
             }
             else
@@ -1453,8 +1468,11 @@ public:
             }
         }
 
-        // cast is a work around if T is an unshared 'shared struct'
-        return cast(T*) objPtr;
+        static if (is(T == class))
+            return objPtr;
+        else
+            // cast is a work around if T is an unshared 'shared struct'
+            return cast(T*) objPtr;
     }
 
     // The user can not directly delete objects in the transaction because the
@@ -1498,11 +1516,12 @@ public:
         if (myOpData is null)
         {
             // Outside a transaction, use regular dispose
-            allocator.dispose(obj);
+            allocator.disposeNoGc(obj);
             return;
         }
 
-        obj.destroy!false;
+        static if (__traits(hasMember, T, "__dtor"))
+            obj.__dtor();
 
         assert(myOpData.numRetires != config.txMaxRetires);
 
