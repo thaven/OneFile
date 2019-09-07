@@ -5,7 +5,10 @@
  *   Pascal Felber <pascal.felber@unine.ch>
  *   Nachshon Cohen <nachshonc@gmail.com>
  *
- * Translated from C++ to D by Harry T. Vennik <htvennik@gmail.com>
+ * Modified for D by Harry T. Vennik <htvennik@gmail.com>
+ *
+ * Copyright 2019
+ *   Harry T. Vennik <htvennik@gmail.com>
  *
  * This work is published under the MIT license. See LICENSE.txt
  */
@@ -17,8 +20,9 @@ import onefile.util.bitarray;
 
 import core.atomic;
 import std.algorithm.mutation : move;
-import std.traits : Fields, hasFunctionAttributes, isCallable, isPointer,
-        isScalarType, Parameters, PointerTarget, ReturnType, Unqual;
+import std.traits : Fields, hasFunctionAttributes, hasUnsharedAliasing,
+        isCallable, isFunction, isPointer, isScalarType, Parameters,
+        PointerTarget, ReturnType, Unqual;
 
 debug import core.stdc.stdio : printf;
 
@@ -571,25 +575,11 @@ private:
     }
 }
 
-template TMType(T)
-if (isPointer!T && !is(PointerTarget!T == shared))
-{
-    alias TMType = TMType!(shared(PointerTarget!T)*);
-}
-
-template TMType(T : shared(T))
-if (!is(T == class) && !is(T == interface))
-{
-    alias TMType = TMType!T;
-}
-
 // T is typically a pointer to a node, but it can be integers or other
 // stuff, as long as it fits in 64 bits
 align(16)
 static shared struct TMType(T)
-if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
-            (isPointer!T && is(PointerTarget!T == shared)))) ||
-            (is(T == class) || is(T == interface))))
+if (T.sizeof <= ulong.sizeof && (!hasUnsharedAliasing!T || is(T == Request)))
 {
     static if (is(T == ulong))
         private struct Val
@@ -607,14 +597,14 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
 
             @nogc nothrow @property:
 
-            ref T typed()
+            ref inout(T) typed() inout
             {
                 return _typed;
             }
 
-            ref T typed() shared
+            ref inout(T) typed() inout shared
             {
-                return *(cast(T*) &_typed);
+                return *(cast(inout T*) &_typed);
             }
         }
     else
@@ -639,7 +629,7 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
     this(T initVal)
     {
         if (__ctfe)
-            val.typed = initVal;
+            cast() val.typed = cast() initVal;
         else
             isolated_store(initVal);
     }
@@ -654,6 +644,13 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
     {
         this.val.untyped = val;
         this.seq = seq;
+    }
+
+    @property
+    ref inout(TMType!U) typed(U)() inout
+    if (is(T == ulong) && is(TMType!U))
+    {
+        return *(cast(inout(TMType!U)*) &this);
     }
 
     @property
@@ -692,7 +689,7 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
     void isolated_store(T newVal)
     {
         Val lNewVal;
-        lNewVal.typed = newVal;
+        cast() lNewVal.typed = cast() newVal;
         val.untyped.atomicStore!(MemoryOrder.raw)(lNewVal.untyped);
     }
 
@@ -707,12 +704,12 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
     private void rawStore(ref T newVal, ulong lseq)
     {
         Val lNewVal;
-        lNewVal.typed = newVal;
+        cast() lNewVal.typed = cast() newVal;
         val.untyped.atomicStore!(MemoryOrder.raw)(lNewVal.untyped);
         seq.atomicStore!(MemoryOrder.rel)(lseq);
     }
 
-    T pload() const shared
+    inout(T) pload() inout shared
     {
         // We have to check if there is a new ongoing transaction and if
         // so, abort this execution immediately for two reasons:
@@ -731,7 +728,7 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
         const myOpData = OneFileWF.OpData.current;
 
         if (null is myOpData)
-            return lval.typed;
+            return cast(inout) lval.typed;
 
         auto lseq = seq.atomicLoad!(MemoryOrder.acq);
 
@@ -739,16 +736,14 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
             throw new AbortedTx("Transaction aborted.");
 
         if (OneFileWF.tl_isReadOnly)
-            return lval.typed;
+            return cast(inout) lval.typed;
 
         lval.untyped = OneFileWF.g_instance
                 .writeSets[ThreadRegistry.s_tid]
                 .lookupAddr(&this, lval);
 
-        return lval.typed;
+        return cast(inout) lval.typed;
     }
-
-    alias pload this;
 
     private bool rawLoad(ref T keepVal, ref ulong keepSeq) const shared
     {
@@ -761,7 +756,7 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
         // it corresponds to the 'val' we're returning.
 
         keepSeq = seq.atomicLoad!(MemoryOrder.acq);
-        keepVal = val.atomicLoad!(MemoryOrder.acq).typed;
+        cast() keepVal = cast() val.atomicLoad!(MemoryOrder.acq).typed;
         return (keepSeq == seq.atomicLoad!(MemoryOrder.acq));
     }
 
@@ -773,18 +768,113 @@ if (T.sizeof <= ulong.sizeof && ((!is(T == shared) && (isScalarType!T ||
         // on load() only.
 
         Val lNewVal;
-        lNewVal.typed = newVal;
+        cast() lNewVal.typed = cast() newVal;
 
         if (null is OneFileWF.OpData.current)
         {
             // Looks like we're outside a transaction
-//            val.atomicStore!(MemoryOrder.raw)(lNewVal);
+            untyped.val.atomicStore!(MemoryOrder.raw)(lNewVal.untyped);
         }
         else
         {
             OneFileWF.g_instance
                 .writeSets[ThreadRegistry.s_tid]
                 .addOrReplace(&this, lNewVal);
+        }
+    }
+
+    @property
+    void opDispatch(string fname, V)(auto ref V value) shared
+    if (__traits(hasMember, val.typed, fname)
+            && !isFunction!(__traits(getMember, val.typed, fname))
+            && is(isAssignable!(V, typeof(__traits(getMember, val.typed, fname)))))
+    {
+        Val lval = { untyped: untyped.pload() };
+
+        immutable orgUntypedValue = lval.untyped;
+        __traits(getMember, lval.typed, fname) = value;
+
+        if (lval.untyped != orgUntypedValue)
+            untyped.pstore(lval.untyped);
+    }
+
+    @property
+    auto opDispatch(string fname)() inout shared
+    if (__traits(hasMember, val.typed, fname)
+            && !isFunction!(__traits(getMember, val.typed, fname)))
+    {
+        inout Val lval = { untyped: untyped.pload() };
+        return __traits(getMember, lval.typed, fname);
+    }
+
+    auto opDispatch(string fname, Args ...)(auto ref Args args) shared
+    if (__traits(hasMember, val.typed, fname)
+            && isFunction!(__traits(getMember, val.typed, fname)))
+    {
+        import core.internal.traits : Unconst;
+        import std.meta : Filter;
+
+        Val lval;
+        lval.typed = pload();
+
+        template isMatchingOverload(alias fn)
+        {
+            enum bool isMatchingOverload = is(Args == Parameters!fn); // FIXME
+        }
+
+        alias F = Filter!(isMatchingOverload, __traits(getOverloads, lval.typed, fname, true))[0];
+        alias R = typeof(__traits(getMember, lval.typed, fname)(args));
+
+        static if (hasFunctionAttributes!(F, "const")
+            || hasFunctionAttributes!(F, "inout"))
+        {
+            static if (is(R == void))
+                __traits(getMember, lval.typed, fname)(args);
+            else
+                return __traits(getMember, lval.typed, fname)(args);
+        }
+        else
+        {
+            static if (is(R == void))
+            {
+                immutable orgUntypedValue = lval.untyped;
+                __traits(getMember, lval.typed, fname)(args);
+
+                if (lval.untyped != orgUntypedValue)
+                    untyped.pstore(lval.untyped);
+            }
+            else
+            {
+                immutable orgUntypedValue = lval.untyped;
+                auto retVal = __traits(getMember, lval.typed, fname)(args);
+
+                if (lval.untyped != orgUntypedValue)
+                    untyped.pstore(lval.untyped);
+
+                return retVal;
+            }
+        }
+    }
+
+    auto opDispatch(string fname, Args ...)(auto ref Args args) inout shared
+    if (__traits(hasMember, val.typed, fname)
+            && isFunction!(__traits(getMember, val.typed, fname)))
+    {
+        inout Val lval = { untyped: untyped.pload() };
+
+        static if (!isFunction!(__traits(getMember, lval.typed, fname)))
+        {
+            static assert(0 == Args.length);
+            return __traits(getMember, lval.typed, fname);
+        }
+        else
+        {
+            alias R = typeof(__traits(getMember, lval.typed, fname)(args));
+
+            if (is(R == void))
+                __traits(getMember, lval.typed, fname)(args);
+            else
+                return __traits(getMember, lval.typed, fname)(args);
         }
     }
 }
@@ -1236,7 +1326,7 @@ public:
                 allocator.make!(SpecializedRequest!func)(args), tid);
 
         static if (!isVoid)
-            return (cast(TMType!(ReturnType!func)) results[tid]).pload();
+            return results[tid].typed!(ReturnType!func).pload();
     }
 
     @nogc
@@ -1277,7 +1367,7 @@ public:
                 allocator.make!(DelegateRequest!DG)(func), tid);
 
         static if (!isVoid)
-            return cast(ReturnType!DG) results[tid].pload();
+            return results[tid].typed!(ReturnType!DG).pload();
     }
 
     // Progress condition: wait-free
@@ -1426,7 +1516,7 @@ public:
     // TODO:
     //    - improve support for class types
     static tmMake(T, Args...)(Args args)
-    if (isTM!T || is(Unqual!T : TMObject))
+    if (isTM!T || is(Unqual!T : TMObject)) // FIXME: class must be derived from TMObject
     {
         auto objPtr = allocator.make!T(args);
 
@@ -1799,3 +1889,4 @@ if (is(T == class))
         alloc.dispose(obj);
     })(alloc, obj);
 }
+
