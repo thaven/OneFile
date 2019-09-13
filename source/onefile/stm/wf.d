@@ -637,51 +637,52 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
     // This is important for DCAS
     static assert(ulong.sizeof * 2 == TMType.sizeof);
 
-    @nogc:
-
-    this(T initVal)
+    @nogc
     {
-        if (__ctfe)
-            cast() val.typed = cast() initVal;
-        else
-            isolated_store(initVal);
-    }
+        this(T initVal)
+        {
+            if (__ctfe)
+                cast() val.typed = cast() initVal;
+            else
+                isolated_store(initVal);
+        }
 
-    // Copy constructor
-    this(TMType other)
-    {
-        pstore(other.pload);
-    }
+        // Copy constructor
+        this(TMType other)
+        {
+            pstore(other.pload);
+        }
 
-    this(ulong val, ulong seq)
-    {
-        this.val.untyped = val;
-        this.seq = seq;
-    }
+        this(ulong val, ulong seq)
+        {
+            this.val.untyped = val;
+            this.seq = seq;
+        }
 
-    @property
-    ref inout(TMType!U) typed(U)() inout
-    if (is(T == ulong) && is(TMType!U))
-    {
-        return *(cast(inout(TMType!U)*) &this);
-    }
+        @property
+        ref inout(TMType!U) typed(U)() inout
+        if (is(T == ulong) && is(TMType!U))
+        {
+            return *(cast(inout(TMType!U)*) &this);
+        }
 
-    @property
-    ref inout(TMType!ulong) untyped() inout
-    {
-        return *(cast(inout(TMType!ulong)*) &this);
-    }
+        @property
+        ref inout(TMType!ulong) untyped() inout
+        {
+            return *(cast(inout(TMType!ulong)*) &this);
+        }
 
-    // Assignment operator from a TMType
-    void opAssign(TMType other)
-    {
-        pstore(other.pload());
-    }
+        // Assignment operator from a TMType
+        void opAssign(TMType other)
+        {
+            pstore(other.pload());
+        }
 
-    // Assignment operator from a value
-    void opAssign(T value)
-    {
-        pstore(value);
+        // Assignment operator from a value
+        void opAssign(T value)
+        {
+            pstore(value);
+        }
     }
 
     void opOpAssign(string op)(TMType lhs)
@@ -695,6 +696,8 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
         pstore(result);
         return result;
     }
+
+    @nogc:
 
     // Meant to be called when we know we're the only ones touching
     // these contents, for example, in the constructor of an object,
