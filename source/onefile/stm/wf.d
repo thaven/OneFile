@@ -1173,51 +1173,10 @@ private:
     HazardErasOF he;
     align(64) shared(TxId) curTx = TxId(1, 0);
 
-public:
     @nogc
     shared static this()
     {
         g_instance = allocator.make!OneFileWF();
-    }
-
-    @nogc
-    @property
-    static instance()
-    {
-        return g_instance;
-    }
-
-    @nogc
-    this()
-    {
-        if (!ThreadRegistry.instance.isInitialized)
-            ThreadRegistry.instance.initialize(config.registryMaxThreads);
-
-        immutable maxThreads = ThreadRegistry.maxThreads;
-
-        he = allocator.make!(HazardErasOF)(cast() maxThreads);
-        opData = allocator.makeArray!OpData(maxThreads);
-        writeSets = allocator.makeArray!WriteSet(maxThreads);
-        operations = allocator.makeArray!(TMType!Request)(maxThreads);
-        results = allocator.makeArray!(TMType!ulong)(maxThreads);
-
-        // This replaces the WriteSet constructor in the original C++ code
-        foreach (ref writeSet; writeSets)
-            for (size_t i = 0; i < config.hashBuckets; ++i)
-                writeSet.buckets[i] = &writeSet.log[config.txMaxStores - 1];
-
-        // TODO: think of something smarter to override default 1 on seq
-        foreach(ref op; operations)
-            op.seq.atomicStore!(MemoryOrder.raw)(0UL);
-    }
-
-    @nogc
-    ~this()
-    {
-        allocator.dispose(opData);
-        allocator.dispose(writeSets);
-        allocator.dispose(cast(void[]) operations);
-        allocator.dispose(cast(void[]) results);
     }
 
     // Progress condition: wait-free population-oblivious
@@ -1275,7 +1234,7 @@ public:
     // but doesn't apply the corresponding write-set; the third transaction
     // guarantees that the log of the second transaction is applied.
     @nogc
-    private void innerUpdateTx(
+    void innerUpdateTx(
         ref OpData myOpData, Request request, in short tid)
     {
         ++myOpData.nestedTrans;
@@ -1335,6 +1294,47 @@ public:
         --myOpData.nestedTrans;
         he.clear(tid);
         retireRequest(tid, request, firstEra);
+    }
+
+public:
+    @nogc
+    @property
+    static instance()
+    {
+        return g_instance;
+    }
+
+    @nogc
+    this()   // Somehow the constructor needs to be public
+    {
+        if (!ThreadRegistry.instance.isInitialized)
+            ThreadRegistry.instance.initialize(config.registryMaxThreads);
+
+        immutable maxThreads = ThreadRegistry.maxThreads;
+
+        he = allocator.make!(HazardErasOF)(cast() maxThreads);
+        opData = allocator.makeArray!OpData(maxThreads);
+        writeSets = allocator.makeArray!WriteSet(maxThreads);
+        operations = allocator.makeArray!(TMType!Request)(maxThreads);
+        results = allocator.makeArray!(TMType!ulong)(maxThreads);
+
+        // This replaces the WriteSet constructor in the original C++ code
+        foreach (ref writeSet; writeSets)
+            for (size_t i = 0; i < config.hashBuckets; ++i)
+                writeSet.buckets[i] = &writeSet.log[config.txMaxStores - 1];
+
+        // TODO: think of something smarter to override default 1 on seq
+        foreach(ref op; operations)
+            op.seq.atomicStore!(MemoryOrder.raw)(0UL);
+    }
+
+    @nogc
+    ~this()
+    {
+        allocator.dispose(opData);
+        allocator.dispose(writeSets);
+        allocator.dispose(cast(void[]) operations);
+        allocator.dispose(cast(void[]) results);
     }
 
     // Update transaction
