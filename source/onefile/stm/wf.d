@@ -699,6 +699,43 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
         return result;
     }
 
+    auto opUnary(string op)()
+    {
+        return mixin(op ~ "(pload())");
+    }
+
+    auto opBinary(string op)(T rhs)
+    {
+        return mixin("pload() " ~ op ~ " rhs");
+    }
+
+    auto opBinary(string op)(TMType rhs)
+    {
+        return mixin("pload() " ~ op ~ " rhs.pload()");
+    }
+
+    auto opBinaryRight(string op)(T lhs)
+    {
+        return mixin("lhs " ~ op ~ " pload()");
+    }
+
+    auto opBinaryRight(string op)(TMType lhs)
+    {
+        return mixin("lhs.pload() " ~ op ~ " pload()");
+    }
+
+    bool opEquals(T rhs) const
+    {
+        return pload() == rhs;
+    }
+
+    bool opEquals(TMType rhs) const
+    {
+        return pload() == rhs.pload();
+    }
+
+    // TODO: comparison operators (opCmp)
+
     @nogc:
 
     // Meant to be called when we know we're the only ones touching
