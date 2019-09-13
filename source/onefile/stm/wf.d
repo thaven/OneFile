@@ -1161,7 +1161,6 @@ private:
 
     enum int maxReadTries = 4;
 
-
     align(64) struct
     {
     align(16):
@@ -1431,6 +1430,7 @@ public:
     ReturnType!func readTx(alias func)(auto ref Parameters!func args)
     if (isCallable!func && !is(ReturnType!func == void))
     {
+        import std.traits : Unqual;
         import std.typecons : UnqualRef;
 
         immutable tid = ThreadRegistry.getTID();
@@ -1449,7 +1449,7 @@ public:
                 || is(ReturnType!func == interface))
             UnqualRef!(ReturnType!func) retval;
         else
-            ReturnType!func retval;
+            Unqual!(ReturnType!func) retval;
 
         writeSets[tid].numStores = 0;
         myOpData.numAllocs = 0;
@@ -1501,6 +1501,9 @@ public:
             && 0 == Parameters!DG.length
             && hasFunctionAttributes!(DG, "@nogc"))
     {
+        import std.traits : Unqual;
+        import std.typecons : UnqualRef;
+
         immutable tid = ThreadRegistry.getTID();
         OpData* myOpData = &opData[tid];
 
@@ -1513,7 +1516,12 @@ public:
 
         debug printf("readTx(tid=%d)\n", tid);
 
-        ReturnType!func retval;
+        static if (is(ReturnType!func == class)
+                || is(ReturnType!func == interface))
+            UnqualRef!(ReturnType!func) retval;
+        else
+            Unqual!(ReturnType!func) retval;
+
         writeSets[tid].numStores = 0;
         myOpData.numAllocs = 0;
         myOpData.numRetires = 0;
@@ -1903,6 +1911,7 @@ class AbortedTx : Exception
 
     alias isInTx = OneFileWF.isInTx;
 }
+
 
 // --- Some private helper functions
 private:
