@@ -685,9 +685,11 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
         }
     }
 
-    void opOpAssign(string op)(TMType lhs)
+    T opOpAssign(string op)(TMType lhs)
     {
-        pstore(mixin("pload() " ~ op ~ " lhs.pload()"));
+        auto result = mixin("pload() " ~ op ~ " lhs.pload()");
+        pstore(result);
+        return result;
     }
 
     T opOpAssign(string op)(T lhs)
