@@ -20,9 +20,8 @@ import onefile.util.bitarray;
 
 import core.atomic;
 import std.algorithm.mutation : move;
-import std.traits : Fields, hasFunctionAttributes, hasUnsharedAliasing,
-        isCallable, isFunction, isPointer, isScalarType, Parameters,
-        PointerTarget, ReturnType, Unqual;
+import std.traits : Fields, hasFunctionAttributes, isCallable, isFunction,
+        isPointer, isScalarType, Parameters, PointerTarget, ReturnType, Unqual;
 
 debug import core.stdc.stdio : printf;
 
@@ -575,11 +574,25 @@ private:
     }
 }
 
+// Provides work-around for Phobos bug
+//         (ERROR: forward reference to variable hasUnsharedAliasing)
+private template safeHasUnsharedAliasing(T)
+{
+    import std.traits : hasUnsharedAliasing;
+
+    static if (is(T == shared))
+        enum bool safeHasUnsharedAliasing = false;
+    else static if (isPointer!T && is(PointerTarget!T == shared))
+        enum bool safeHasUnsharedAliasing = false;
+    else
+        alias safeHasUnsharedAliasing = hasUnsharedAliasing!T;
+}
+
 // T is typically a pointer to a node, but it can be integers or other
 // stuff, as long as it fits in 64 bits
 align(16)
 static shared struct TMType(T)
-if (T.sizeof <= ulong.sizeof && (!hasUnsharedAliasing!T || is(T == Request)))
+if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request)))
 {
     static if (is(T == ulong))
         private struct Val
