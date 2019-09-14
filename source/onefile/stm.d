@@ -5,48 +5,39 @@
  *   Pascal Felber <pascal.felber@unine.ch>
  *   Nachshon Cohen <nachshonc@gmail.com>
  *
- * Modified for D by Harry T. Vennik <htvennik@gmail.com>
+ * Modified for D by Harry T. Vennik.
  *
  * Copyright 2019
  *   Harry T. Vennik <htvennik@gmail.com>
  *
  * This work is published under the MIT license. See LICENSE.txt
  */
+module onefile.stm;
 
-module onefile.stm.wf;
-
-import onefile.util.allocator;
-import onefile.util.bitarray;
+import onefile.internal.allocator;
+import onefile.internal.config : config;
+import onefile.thread_registry : ThreadRegistry;
 
 import core.atomic;
 import std.algorithm.mutation : move;
 import std.traits : Fields, hasFunctionAttributes, isCallable, isFunction,
         isPointer, isScalarType, Parameters, PointerTarget, ReturnType, Unqual;
 
-debug import core.stdc.stdio : printf;
-
-struct Config
-{
-    ushort registryMaxThreads = 128;
-    ulong txMaxStores = 40*1024;
-    ulong hashBuckets = 1024;
-    ulong txMaxAllocs = 10*1024;
-    ulong txMaxRetires = 10*1024;
-}
-
-enum Config config = Config.init;
+debug(PRINTF) import core.stdc.stdio : printf;
 
 struct TxId
 {
-    private ulong _raw;
+private:
+    ulong _raw;
 
-    @nogc nothrow pure @safe:
+@nogc nothrow pure @safe:
 
     this(ulong seq, ushort idx)
     {
         _raw = (seq << 10) | idx;
     }
 
+public:
     @property
     ulong seq() const
     {
@@ -60,131 +51,9 @@ struct TxId
     }
 }
 
-align(128)
-struct ThreadRegistry
-{
-private:
-    shared static ThreadRegistry g_instance;
-    static short s_tid = -1;
-
-    // Bit array indicating which TIDs are in use by threads
-    AtomicBitArray _usedTID;
-
-    // Highest TID (+1) in use by threads
-    short _maxTid = -1;
-
-public @nogc:
-
-    static instance()
-    {
-        return &g_instance;
-    }
-
-    @disable this();
-    @disable this() shared;
-
-    void initialize(ushort maxThreads) shared
-    in (-1 == _maxTid)
-    in (maxThreads < (1 << 10)) // cannot support more because of TxId format
-    {
-        // We can quite safely cast away shared here because no threads
-        // are in the registry yet.
-        () @trusted {
-            return cast(AtomicBitArray*) &_usedTID;
-        } ().length = maxThreads;
-
-        registerThreadNew();
-    }
-
-    @property
-    bool isInitialized() shared
-    {
-        return 0 != _usedTID.length;
-    }
-
-    // Progress condition: wait-free bounded (by the number of threads)
-    short registerThreadNew() shared
-    in (s_tid == -1)
-    {
-        auto l = _usedTID.length;
-
-        for (short tid = 0; tid < l; ++tid)
-        {
-            if (!_usedTID.setIfClear(tid))
-                continue;
-
-            short curMax = _maxTid.atomicLoad();
-            while (curMax <= tid)
-            {
-                _maxTid.casByRef(curMax, cast(short) (tid+1));
-                curMax = _maxTid.atomicLoad();
-            }
-
-            s_tid = tid;
-            return tid;
-        }
-
-        throw new ThreadRegistryException(
-            0 == l ? "Thread registry not initialized" : "Too many threads");
-    }
-
-    // Progress condition: wait-free population oblivious
-    nothrow
-    private void deregisterThread(in short tid) shared
-    {
-        _usedTID[tid] = false;
-    }
-
-    // Progress condition: wait-free population oblivious
-    nothrow
-    @property
-    static short maxTID()
-    {
-        auto lmaxTid = g_instance._maxTid.atomicLoad!(MemoryOrder.acq);
-        return (lmaxTid > 0) ? lmaxTid : 0;
-    }
-
-    nothrow
-    @property
-    @safe
-    static ushort maxThreads()
-    {
-        return cast(ushort) g_instance._usedTID.length;
-    }
-
-    // Progress condition: wait-free bounded (by the number of threads)
-    @trusted
-    static short getTID()
-    {
-        auto tid = g_instance.s_tid;
-        return (tid >= 0) ? tid : g_instance.registerThreadNew();
-    }
-
-    static void deregisterMe()
-    {
-        g_instance.deregisterThread(getTID());
-        s_tid = -1;
-    }
-
-    // Progress condition: wait-free bounded (by the number of threads)
-    @safe
-    static bool isMe(in short tid)
-    {
-        return tid == g_instance.s_tid;
-    }
-}
-
-class ThreadRegistryException : Exception
-{
-    import std.exception : basicExceptionCtors;
-
-    ///
-    mixin basicExceptionCtors;
-}
-
 struct TMStruct
 {
-private:
+package:
     ulong _newEra;
     ulong _delEra;
 }
@@ -207,15 +76,15 @@ if (!is(T == struct))
 +/
 abstract class TMObject
 {
-private:
+package:
     TMStruct _tm;
 }
 
-private abstract class Request : TMObject
+package abstract class Request : TMObject
 {
     @nogc:
 
-    abstract ulong execute();
+    protected abstract ulong execute();
     ~this() { }
 }
 
@@ -332,245 +201,6 @@ public @nogc:
             return cast(ulong) cast(void*) mixin(_code_callFunc);
         else
             return cast(ulong) mixin(_code_callFunc);
-    }
-}
-
-private struct RListEntry
-{
-private:
-    static struct Chunk
-    {
-        void[] chunk;
-    }
-
-    void* _obj;
-    TypeInfo _ti;
-
-public @nogc nothrow:
-
-    pure
-    this(T)(T* obj)
-    if (isTM!T)
-    {
-        _obj = cast(void*) obj;
-        _ti = typeid(T);
-    }
-
-    pure
-    this(T)(T obj)
-    if (is(Unqual!T : TMObject))
-    {
-        _obj = cast(void*) obj;
-        _ti = obj.classinfo;
-    }
-
-    this(void[] chunk)
-    {
-        _obj = allocator.make!Chunk(chunk);
-        _ti = typeid(Chunk);
-    }
-
-    ~this()
-    {
-        if (_ti is typeid(Chunk))
-            allocator.dispose(cast(Chunk*) _obj);
-    }
-
-pure:
-
-    @property
-    size_t allocSize()
-    {
-        if (auto tiCls = cast(TypeInfo_Class)_ti)
-            return tiCls.m_init.length;
-        else if (_ti is typeid(Chunk))
-            return (cast(Chunk*)_obj).chunk.length;
-        else
-            return _ti.tsize;
-    }
-
-    @property
-    void[] chunk()
-    {
-        if (_ti is typeid(Chunk))
-            return (cast(Chunk*)_obj).chunk;
-        else
-            return _obj[0 .. allocSize];
-    }
-
-    @property
-    ref TMStruct tmStruct()
-    {
-        if (_ti is typeid(Chunk))
-            return *(cast(TMStruct*) (cast(Chunk*)_obj).chunk.ptr);
-        else if (auto tmObj = cast(TMObject)_obj)
-            return tmObj._tm;
-        else
-            return *(cast(TMStruct*)_obj);
-    }
-}
-
-template CacheAligned(T)
-{
-    enum cacheAlignment = 64;
-
-    static if (T.alignof >= cacheAlignment)
-        alias CacheAligned = T;
-    else
-    {
-        align(cacheAlignment)
-        struct CacheAligned
-        {
-            private T _value;
-            alias value this;
-
-            this(V)(V value)
-            {
-                _value = value;
-            }
-
-            @property
-            ref value() inout return
-            {
-                return _value;
-            }
-        }
-    }
-}
-
-private class HazardErasOF
-{
-private:
-    import std.container.array : Array;
-
-    enum ulong noEra = 0;
-    enum int   thresholdR = 0;
-
-    immutable uint maxThreads;
-    CacheAligned!(shared ulong)[] he;
-    Array!(CacheAligned!RListEntry)[] retiredList;
-    Array!(CacheAligned!Request)[] retiredListTx;
-
-    @nogc:
-
-    public this(uint maxThreads)
-    {
-        this.maxThreads = maxThreads;
-        he = allocator.makeArray!(CacheAligned!(shared ulong))(maxThreads);
-        retiredList = allocator.makeArray!(
-            Array!(CacheAligned!RListEntry))(maxThreads);
-        retiredListTx = allocator.makeArray!(
-            Array!(CacheAligned!Request))(maxThreads);
-    }
-
-    ~this()
-    {
-        allocator.dispose(cast(CacheAligned!ulong[]) he);
-        allocator.dispose(cast(Array!(CacheAligned!RListEntry)[]) retiredList);
-        allocator.dispose(cast(Array!(CacheAligned!Request)[]) retiredListTx);
-    }
-
-    // Progress condition: wait-free population oblivious
-    void clear(in short tid)
-    in (ThreadRegistry.isMe(tid))
-    {
-        he[tid].value.atomicStore!(MemoryOrder.rel)(noEra);
-    }
-
-    // Progress condition: wait-free population oblivious
-    void set(TxId trans, in short tid)
-    in (ThreadRegistry.isMe(tid))
-    {
-        he[tid].value.atomicStore(trans.seq);
-    }
-
-    // Progress condition: wait-free population oblivious
-    void addToRetiredList(RListEntry newdel, in short tid)
-    in (ThreadRegistry.isMe(tid))
-    {
-        retiredList[tid].insertBack(CacheAligned!RListEntry(newdel));
-    }
-
-    // Progress condition: wait-free population oblivious
-    void addToRetiredListTx(Request tx, in short tid)
-    in (ThreadRegistry.isMe(tid))
-    {
-        retiredListTx[tid].insertBack(CacheAligned!Request(tx));
-    }
-
-    /**
-     * Progress condition: bounded wait-free
-     *
-     * Attemps to delete the no-longer-in-use objects in the retired list.
-     * We need to pass the currEra coming from the seq of the currTx so that
-     * the objects from the current transaction don't get deleted.
-     */
-    void clean(ulong curEra, in short tid)
-    in (ThreadRegistry.isMe(tid))
-    {
-        debug int n;
-        auto myRL = retiredList[tid];
-
-        if (myRL.length < thresholdR)
-            return;
-
-        for (size_t iret = 0; iret < myRL.length;)
-        {
-            RListEntry del = myRL[iret];
-            if (canDelete(curEra, del.tmStruct))
-            {
-                move(myRL[$ - 1], myRL[iret]);
-                myRL.removeBack(1);
-                // No need to call destructor because it was executed
-                // as part of the transaction
-
-                debug ++n;
-                allocator.deallocate(del.chunk);
-                continue;
-            }
-            iret++;
-        }
-
-        debug printf("HE Deallocated %d objects\n", n);
-        debug n = 0;
-
-        auto myRLTx = retiredListTx[tid];
-
-        for (size_t iret = 0; iret < myRLTx.length;)
-        {
-            Request tx = myRLTx[iret];
-
-            if (canDelete(curEra, tx._tm))
-            {
-                myRLTx[iret] = myRLTx[$ - 1];
-                myRLTx.removeBack(1);
-                allocator.disposeNoGc(tx);
-                debug ++n;
-                continue;
-            }
-            iret++;
-        }
-
-        debug printf("HE Deallocated %d requests\n", n);
-    }
-
-    // Progress condition: wait-free bounded (by the number of threads)
-    private bool canDelete(ulong curEra, in ref TMStruct del)
-    {
-        // We can't delete objects from the current transaction
-        if (del._delEra == curEra)
-            return false;
-
-        for (uint it = 0; it < ThreadRegistry.maxTID; ++it)
-        {
-            const era = he[it].value.atomicLoad!(MemoryOrder.acq);
-            if (era == noEra || era < del._newEra || era > del._delEra)
-                continue;
-
-            return false;
-        }
-
-        return true;
     }
 }
 
@@ -938,9 +568,13 @@ align(64)
 class OneFileWF
 {
 private:
+    import onefile.hazard_eras : HazardErasOF;
+
     // Its purpose is to hold thread-local data
     static struct OpData
     {
+        import onefile.hazard_eras : RListEntry;
+
         private static OpData* tl_current;
 
         @nogc
@@ -1203,12 +837,12 @@ private:
         // Attempt to CAS curTx to our OpData instance (tid) incrementing the
         // seq in it
         auto lcurTx = myOpData.curTx;
-        debug printf("tid=%i  attempting CAS on curTx from (%ld,%ld) to (%ld,%ld)\n",
+        debug(PRINTF) printf("tid=%i  attempting CAS on curTx from (%ld,%ld) to (%ld,%ld)\n",
             tid, lcurTx.seq, lcurTx.idx, seq + 1, cast(ulong)tid);
 
         if (!curTx.casByRef(lcurTx, newTx))
         {
-            debug printf("Failed to commit transaction (%ld,%ld)\n",
+            debug(PRINTF) printf("Failed to commit transaction (%ld,%ld)\n",
                 seq + 1, cast(ulong)tid);
             return false;
         }
@@ -1218,7 +852,7 @@ private:
         helpApply(newTx, tid);
         retireRetiresFromLog(myOpData, tid);
         myOpData.numAllocs = 0;
-        debug printf("Committed transaction (%ld,%ld) with %ld stores\n",
+        debug(PRINTF) printf("Committed transaction (%ld,%ld) with %ld stores\n",
             seq + 1, cast(ulong)tid, writeSets[tid].numStores);
 
         return true;
@@ -1239,7 +873,7 @@ private:
     {
         ++myOpData.nestedTrans;
 
-        debug printf("updateTx(tid=%d)\n", tid);
+        debug(PRINTF) printf("updateTx(tid=%d)\n", tid);
 
         // We need an era from before the 'funcptr' is announced, so as to
         // protect it
@@ -1443,7 +1077,7 @@ public:
         OpData.current = myOpData;
         tl_isReadOnly = true;
 
-        debug printf("readTx(tid=%d)\n", tid);
+        debug(PRINTF) printf("readTx(tid=%d)\n", tid);
 
         static if (is(ReturnType!func == class)
                 || is(ReturnType!func == interface))
@@ -1483,7 +1117,7 @@ public:
             return retval;
         }
 
-        debug printf("readTx() executed %d times, posing as updateTx()\n",
+        debug(PRINTF) printf("readTx() executed %d times, posing as updateTx()\n",
                 maxReadTries);
 
         --myOpData.nestedTrans;
@@ -1514,7 +1148,7 @@ public:
         OpData.current = myOpData;
         tl_isReadOnly = true;
 
-        debug printf("readTx(tid=%d)\n", tid);
+        debug(PRINTF) printf("readTx(tid=%d)\n", tid);
 
         static if (is(ReturnType!func == class)
                 || is(ReturnType!func == interface))
@@ -1554,7 +1188,7 @@ public:
             return retval;
         }
 
-        debug printf("readTx() executed %d times, posing as updateTx()\n",
+        debug(PRINTF) printf("readTx() executed %d times, posing as updateTx()\n",
                 maxReadTries);
 
         --myOpData.nestedTrans;
@@ -1639,6 +1273,7 @@ public:
     if (isTM!T)
     {
         import std.traits : hasElaborateDestructor;
+        import onefile.hazard_eras : RListEntry;
 
         if (obj is null)
             return;
@@ -1666,6 +1301,8 @@ public:
     static void tmDispose(T)(auto ref T obj)
     if (is(Unqual!T : TMObject))
     {
+        import onefile.hazard_eras : RListEntry;
+
         if (obj is null)
             return;
 
@@ -1721,6 +1358,8 @@ public:
     @nogc
     static void tmDeallocate(void[] chunk)
     {
+        import onefile.hazard_eras : RListEntry;
+
         if (chunk is null)
             return;
 
@@ -1768,7 +1407,7 @@ private @nogc:
                 return;
         }
 
-        debug printf("Applying %ld stores in write-set\n",
+        debug(PRINTF) printf("Applying %ld stores in write-set\n",
                 writeSets[tid].numStores);
 
         writeSets[tid].apply(seq, tid);
@@ -1926,31 +1565,5 @@ void[] toChunk(T)(T obj)
 if (is(T == class))
 {
     return (cast(void*)obj)[0 .. obj.classinfo.init.length];
-}
-
-template isNoGcDestroyable(T)
-if (is(T == class))
-{
-    static if (__traits(hasMember, T, "__dtor"))
-        enum bool isNoGcDestroyable = hasFunctionAttributes!(T.__dtor, "@nogc");
-    else
-        enum bool isNoGcDestroyable = true;
-}
-
-@nogc
-void disposeNoGc(A, T)(auto ref A alloc, auto ref T obj)
-if (is(T == class))
-{
-    import std.traits : fullyQualifiedName, hasFunctionAttributes;
-
-    static assert(hasFunctionAttributes!(A.deallocate, "@nogc"),
-            "Cannot use disposeNoGc with GC reliant allocator");
-
-    static assert(isNoGcDestroyable!T,
-            "Destructor of " ~ fullyQualifiedName!T ~ "is not @nogc");
-
-    (cast(void function(ref A, ref T) @nogc) (ref A alloc, ref T obj) {
-        alloc.dispose(obj);
-    })(alloc, obj);
 }
 

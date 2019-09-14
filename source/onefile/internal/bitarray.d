@@ -4,10 +4,10 @@
  *
  * This work is published under the MIT license. See LICENSE.txt
  */
-module onefile.util.bitarray;
+module onefile.internal.bitarray;
 
 import core.atomic;
-import onefile.util.allocator;
+import onefile.internal.allocator;
 
 struct AtomicBitArray
 {
