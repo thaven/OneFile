@@ -218,8 +218,17 @@ private template safeHasUnsharedAliasing(T)
         alias safeHasUnsharedAliasing = hasUnsharedAliasing!T;
 }
 
-// T is typically a pointer to a node, but it can be integers or other
-// stuff, as long as it fits in 64 bits
+/++
+Denotes a transactional memory location
+
+A TMType has a storage capacity of 64 bits.
+
+`T` is the type of value to be stored. This is typically a pointer to a node,
+but it can be an integer or other stuff, as long as it fits in 64 bits.
+
+`TMType!T` will try to behave like `T` as much as possible. In cases where it
+doesn't, you'll probably need to add an explicit `.pload()`.
++/
 align(16)
 static shared struct TMType(T)
 if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request)))
@@ -269,6 +278,12 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
 
     @nogc
     {
+        /++
+        Construct a TMType initialized with a specific value
+
+        Params:
+            initVal = the initial value for this TMType
+        +/
         this(T initVal)
         {
             if (__ctfe)
@@ -277,7 +292,12 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
                 isolated_store(initVal);
         }
 
-        // Copy constructor
+        /++
+        Construct a TMType initialized with a value obtained from another TMType
+
+        Params:
+            other = the TMType whose value is to be copied into this new TMType
+        +/
         this(TMType other)
         {
             pstore(other.pload);
@@ -289,6 +309,13 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
             this.seq = seq;
         }
 
+        /++
+        Convert this to a typed instance
+
+        Only valid on `TMType!ulong`
+
+        Returns: a reference to this TMType, typed as requested
+        +/
         @property
         ref inout(TMType!U) typed(U)() inout
         if (is(T == ulong) && is(TMType!U))
@@ -296,6 +323,13 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
             return *(cast(inout(TMType!U)*) &this);
         }
 
+        /++
+        Convert this to an untyped instance
+
+        For `TMType!ulong`, this is a noop.
+
+        Returns: a reference to this TMType, typed as a TMType!ulong
+        +/
         @property
         ref inout(TMType!ulong) untyped() inout
         {
@@ -368,9 +402,19 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
 
     @nogc:
 
-    // Meant to be called when we know we're the only ones touching
-    // these contents, for example, in the constructor of an object,
-    // before making the object visible to other threads.
+    /++
+    Isolated store
+
+    Meant to be called when we know we're the only ones touching these contents,
+    for example, in the constructor of an object, before making the object
+    visible to other threads.
+
+    An `isolated_store` is faster than a `pstore`, but is not transactionally
+    safe.
+
+    Params:
+        newVal = the new value for this TMType
+    +/
     void isolated_store(T newVal)
     {
         Val lNewVal;
@@ -394,6 +438,17 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
         seq.atomicStore!(MemoryOrder.rel)(lseq);
     }
 
+    /++
+    Gets the value of this TMType as seen in the current transaction
+
+    If called outside a transaction, it returns the latest committed value.
+
+    If another transaction committed a write to this TMType after the current
+    transaction started, `pload` will abort the current transaction.
+
+    If the current transaction has written to this TMType already, that
+    uncommitted value is returned.
+    +/
     inout(T) pload() inout shared
     {
         // We have to check if there is a new ongoing transaction and if
@@ -445,6 +500,20 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
         return (keepSeq == seq.atomicLoad!(MemoryOrder.acq));
     }
 
+    /++
+    Transactional store
+
+    Adds the specified value to the write set of the current transaction. This
+    TMType itself will get updated when the write set is applied during
+    transaction commit.
+
+    If called outside a transaction, just updates the TMType, much like
+    `isolated_store`. Such may break invariants of a transaction executing in
+    parallel.
+
+    Params:
+        newVal = the new value for this TMType
+    +/
     void pstore(T newVal) shared
     {
         // We don't need to check currTx here because we're not
@@ -1507,24 +1576,53 @@ class AbortedTx : Exception
 //
 
 @nogc {
+    /++
+    Perform a read transaction.
+
+    Use a readTx when you are sure that func will not try to modify any
+    transactional data. Usually `readTx` is faster than `updateTx` with the same
+    function.
+
+    Transactions can safely be nested, as long as an update transaction is never
+    nested inside a read transaction.
+
+    Trying to modify transactional data inside a read transaction results in
+    undefined behavior.
+
+    Parameters:
+        func = (delegate to a) function that implements the transaction to be
+            executed.
+    +/
     ReturnType!DG readTx(DG)(scope DG func)
     if (!is(ReturnType!DG == void) && 0 == Parameters!func.length)
     {
         return OneFileWF.instance.readTx(func);
     }
 
+    /// ditto
     ReturnType!func readTx(alias func)(auto ref Parameters!func args)
     if (!is(ReturnType!func == void))
     {
         return OneFileWF.instance.readTx!func(args);
     }
 
+    /++
+    Perform an update transaction.
+
+    Transactions can safely be nested, as long as an update transaction is never
+    nested inside a read transaction.
+
+    Parameters:
+        func = (delegate to a) function that implements the transaction to be
+            executed.
+    +/
     ReturnType!DG updateTx(DG)(scope DG func)
     if (!is(ReturnType!DG == void) && 0 == Parameters!func.length)
     {
         return OneFileWF.instance.updateTx(func);
     }
 
+    /// ditto
     ReturnType!func updateTx(alias func)(auto ref Parameters!func args)
     if (!is(ReturnType!func == void))
     {
