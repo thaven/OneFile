@@ -303,7 +303,7 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
             pstore(other.pload);
         }
 
-        this(ulong val, ulong seq)
+        private this(ulong val, ulong seq)
         {
             this.val.untyped = val;
             this.seq = seq;
