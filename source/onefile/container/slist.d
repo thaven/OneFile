@@ -147,6 +147,11 @@ private:
 
     @nogc:
 
+    this(inout(shared Root)* root) inout
+    {
+        _root = root;
+    }
+
     void initialize()
     {
         if (null !is _root)
@@ -227,7 +232,7 @@ public:
         @property
         auto list() inout
         {
-            return SList(&this);
+            return inout(SList)(&this);
         }
 
         alias list this;
