@@ -31,73 +31,6 @@ import std.traits : isInstanceOf, Unqual;
 struct SList(T)
 {
 private:
-    shared static struct Root
-    {
-    private:
-        TMStruct _tm;
-
-        TMType!(shared(Node)*) _head;
-        TMType!(shared(Node)*) _tail;
-        TMType!ulong _refCnt = 1UL;
-
-    public @nogc:
-
-        ~this()
-        {
-            updateTx({
-                assert(0 == _refCnt);
-
-                Node* node = head;
-
-                _head = null;
-                _tail = null;
-
-                while (null != node)
-                {
-                    Node* next = node.next;
-                    tmDispose(node);
-                    node = next;
-                }
-            });
-        }
-
-        @property
-        auto head() inout
-        {
-            return _head.pload();
-        }
-
-        @property
-        void head(shared(Node)* value)
-        {
-            _head = value;
-        }
-
-        @property
-        void head(ref typeof(_head) value)
-        {
-            _head = value;
-        }
-
-        @property
-        auto tail() inout
-        {
-            return _tail.pload();
-        }
-
-        @property
-        void tail(shared(Node)* value)
-        {
-            _tail = value;
-        }
-
-        @property
-        void tail(ref typeof(_head) value)
-        {
-            _tail = value;
-        }
-    }
-
     shared static struct Node
     {
         private TMStruct _tm;
@@ -225,6 +158,81 @@ private:
     }
 
 public:
+    shared static struct Root
+    {
+    private:
+        TMStruct _tm;
+
+        TMType!(shared(Node)*) _head;
+        TMType!(shared(Node)*) _tail;
+        TMType!ulong _refCnt = 1UL;
+
+        @property
+        auto head() inout
+        {
+            return _head.pload();
+        }
+
+        @property
+        void head(shared(Node)* value)
+        {
+            _head = value;
+        }
+
+        @property
+        void head(ref typeof(_head) value)
+        {
+            _head = value;
+        }
+
+        @property
+        auto tail() inout
+        {
+            return _tail.pload();
+        }
+
+        @property
+        void tail(shared(Node)* value)
+        {
+            _tail = value;
+        }
+
+        @property
+        void tail(ref typeof(_head) value)
+        {
+            _tail = value;
+        }
+
+    public @nogc:
+
+        ~this()
+        {
+            updateTx({
+                assert(0 == _refCnt);
+
+                Node* node = head;
+
+                _head = null;
+                _tail = null;
+
+                while (null != node)
+                {
+                    Node* next = node.next;
+                    tmDispose(node);
+                    node = next;
+                }
+            });
+        }
+
+        @property
+        auto list() inout
+        {
+            return SList(&this);
+        }
+
+        alias list this;
+    }
+
     this(Stuff)(Stuff stuff)
     if (isValidStuff!Stuff)
     {
