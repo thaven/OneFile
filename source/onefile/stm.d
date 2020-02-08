@@ -1466,6 +1466,38 @@ public:
         move(rle, myOpData.rlog[myOpData.numRetires++]);
     }
 
+    @nogc:
+    static bool isUncommittedTMAllocation(PTR)(PTR ptr)
+    if (is(Unqual!PTR : TMObject))
+    {
+        OpData* myOpData = OpData.current;
+
+        if (null is myOpData)
+            return false;
+
+        myOpData.alog[].any!(e => e.obj is cast(void*) ptr);
+    }
+
+    @nogc:
+    static bool isUncommittedTMAllocation(PTR)(PTR ptr)
+    if (!is(T == class) && !isTM!T)
+    {
+        OpData* myOpData = OpData.current;
+
+        if (null is myOpData)
+            return false;
+
+        myOpData.alog[].any!(e => e.obj is ptr);
+    }
+
+    @nogc:
+    static bool isUncommittedTMAllocation(PTR)(PTR ptr)
+    if (!isTM!(PointerTarget!PTR))
+    {
+        return isUncommittedTMAllocation(
+                cast(TMStruct*) (ptr - TMStruct.sizeof));
+    }
+
 private @nogc:
     // Progress condition: wait-free population oblivious
     void helpApply(in TxId lcurTx, in short tid)
