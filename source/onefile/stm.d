@@ -1331,6 +1331,14 @@ public:
             return cast(T*) objPtr;
     }
 
+    static tmMake(T, Args...)(Args args)
+    if (!is(T == class) && !isTM!T)
+    {
+        import std.conv : emplace;
+
+        return tmAllocate(T.sizeof).emplace!T(args);
+    }
+
     // The user can not directly delete objects in the transaction because the
     // transaction may fail and needs to be retried and other threads may be
     // using those objects.
@@ -1393,6 +1401,15 @@ public:
 
         static if (__traits(isRef, obj))
             obj = null;
+    }
+
+    static void tmDispose(T)(auto ref T* obj)
+    if (!is(T == class) && !isTM!T)
+    {
+        static if (is(T == struct))
+            destroy!false(*obj);
+
+        tmDeallocate(cast(void[]) obj[0 .. 1]);
     }
 
     // We snap a TMStruct at the beginning of the allocation
