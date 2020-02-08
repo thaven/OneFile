@@ -79,7 +79,7 @@ pure:
             immutable appliedValue = (arrValue & mask) | shiftedValue;
 
             if (arrValue == appliedValue
-                    || _arr[arrIdx].casByRef(arrValue, appliedValue))
+                    || (&_arr[arrIdx]).cas(arrValue, appliedValue))
                 return;
         }
         while (true);
@@ -97,7 +97,7 @@ pure:
             if (arrValue & shiftedValue)
                 return false;
 
-            if (_arr[arrIdx].casByRef(arrValue, arrValue | shiftedValue))
+            if ((&_arr[arrIdx]).cas(arrValue, arrValue | shiftedValue))
                 return true;
         }
         while(true);

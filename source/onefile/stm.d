@@ -527,7 +527,7 @@ if (T.sizeof <= ulong.sizeof && (!safeHasUnsharedAliasing!T || is(T == Request))
         if (null is OneFileWF.OpData.current)
         {
             // Looks like we're outside a transaction
-            untyped.val.atomicStore!(MemoryOrder.raw)(lNewVal.untyped);
+            untyped.val.untyped.atomicStore!(MemoryOrder.raw)(lNewVal.untyped);
         }
         else
         {
@@ -909,7 +909,7 @@ private:
         debug(PRINTF) printf("tid=%i  attempting CAS on curTx from (%ld,%ld) to (%ld,%ld)\n",
             tid, lcurTx.seq, lcurTx.idx, seq + 1, cast(ulong)tid);
 
-        if (!curTx.casByRef(lcurTx, newTx))
+        if (!(&curTx).cas(lcurTx, newTx))
         {
             debug(PRINTF) printf("Failed to commit transaction (%ld,%ld)\n",
                 seq + 1, cast(ulong)tid);
@@ -1535,7 +1535,7 @@ private @nogc:
         if (idx == tid)
             opd.request.atomicStore!(MemoryOrder.rel)(newReq);
         else if (opd.request.atomicLoad!(MemoryOrder.acq) == lcurTx)
-            opd.request.casByRef(lcurTx, newReq);
+            (&opd.request).cas(lcurTx, newReq);
     }
 
     // This is called when the transaction fails, to undo all the allocations

@@ -18,7 +18,7 @@ align(128)
 struct ThreadRegistry
 {
 private:
-    import core.atomic : atomicLoad, casByRef, MemoryOrder;
+    import core.atomic : atomicLoad, cas, MemoryOrder;
     import onefile.internal.bitarray : AtomicBitArray;
 
     shared static ThreadRegistry g_instance;
@@ -73,7 +73,7 @@ public @nogc:
             short curMax = _maxTid.atomicLoad();
             while (curMax <= tid)
             {
-                _maxTid.casByRef(curMax, cast(short) (tid+1));
+                (&_maxTid).cas(curMax, cast(short) (tid+1));
                 curMax = _maxTid.atomicLoad();
             }
 
