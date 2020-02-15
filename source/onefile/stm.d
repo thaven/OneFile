@@ -857,6 +857,21 @@ private:
         void function(void[]) @nogc reclaim;
     }
 
+    struct TMWrapper(T)
+    if (!is(T == class) && !isTM!T)
+    {
+    private:
+        TMStruct _tm;
+        T _payload;
+
+    public:
+        this(Args...)(auto ref Args args)
+        if (Args.length >= 1)
+        {
+            _payload = T(args);
+        }
+    }
+
     __gshared static OneFileWF g_instance;
 
     // Indicates if the current thread is only a reader
@@ -1334,9 +1349,7 @@ public:
     static tmMake(T, Args...)(Args args)
     if (!is(T == class) && !isTM!T)
     {
-        import std.conv : emplace;
-
-        return tmAllocate(T.sizeof).emplace!T(args);
+        return &tmMake!(TMWrapper!T)(args)._payload;
     }
 
     // The user can not directly delete objects in the transaction because the
@@ -1364,7 +1377,7 @@ public:
         }
 
         static if (hasElaborateDestructor!T)
-            obj.__dtor(); // Execute destructor as part of the current transaction
+            obj.__xdtor(); // Execute destructor as part of the current transaction
 
         assert(myOpData.numRetires != config.txMaxRetires);
 
@@ -1406,10 +1419,8 @@ public:
     static void tmDispose(T)(auto ref T* obj)
     if (!is(T == class) && !isTM!T)
     {
-        static if (is(T == struct))
-            destroy!false(*obj);
-
-        tmDeallocate(cast(void[]) obj[0 .. 1]);
+        auto w = cast(TMWrapper!T*) (cast(void*)obj - TMWrapper!T._payload.offsetof);
+        tmDispose(w);
     }
 
     // We snap a TMStruct at the beginning of the allocation
