@@ -21,15 +21,25 @@ package(onefile):
 
 alias allocator = AlignedMallocator.instance;
 
-template isNoGcDestroyable(T)
+private template isDestructorNoGc(T)
 if (is(T == class))
 {
     import std.traits : hasFunctionAttributes;
 
     static if (__traits(hasMember, T, "__dtor"))
-        enum bool isNoGcDestroyable = hasFunctionAttributes!(T.__dtor, "@nogc");
+        enum bool isDestructorNoGc = hasFunctionAttributes!(T.__dtor, "@nogc");
     else
-        enum bool isNoGcDestroyable = true;
+        enum bool isDestructorNoGc = true;
+}
+
+template isNoGcDestroyable(T)
+if (is(T == class))
+{
+    import std.meta : allSatisfy;
+    import std.traits : BaseClassesTuple;
+
+    enum bool isNoGcDestroyable =
+            allSatisfy!(isDestructorNoGc, BaseClassesTuple!T);
 }
 
 @nogc
