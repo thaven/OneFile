@@ -1376,8 +1376,7 @@ public:
             return;
         }
 
-        static if (hasElaborateDestructor!T)
-            obj.__xdtor(); // Execute destructor as part of the current transaction
+        destroy!false(obj);
 
         assert(myOpData.numRetires != config.txMaxRetires);
 
@@ -1404,8 +1403,7 @@ public:
             return;
         }
 
-        static if (__traits(hasMember, T, "__dtor"))
-            obj.__dtor();
+        destroy!false(obj);
 
         assert(myOpData.numRetires != config.txMaxRetires);
 
